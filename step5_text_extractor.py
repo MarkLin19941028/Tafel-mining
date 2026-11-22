@@ -258,22 +258,9 @@ IMMERSION_TIME_PATTERN = re.compile(
 #   - 英文全名：不分大小寫 + \b 單字邊界
 # --------------------------------------------------------------------
 
-_BASE_SYMBOLS = ["Cu", "Co", "W", "Ru", "Ti", "Ta", "Al", "Mn", "Mo",
-                 "Ni", "Fe", "Zn", "Mg", "Sn", "Pb", "Cr", "Pt", "Au", "Ag", "Pd", "Ir"]
+from materials_loader import build_text_recognition_tables
 
-_NAME_TO_SYMBOL = {
-    "titanium nitride": "TiN", "tantalum nitride": "TaN",
-    "tungsten nitride": "WN",
-    "copper": "Cu", "cobalt": "Co", "tungsten": "W", "wolfram": "W",
-    "ruthenium": "Ru", "titanium": "Ti", "tantalum": "Ta",
-    "aluminum": "Al", "aluminium": "Al", "manganese": "Mn",
-    "molybdenum": "Mo", "nickel": "Ni", "iron": "Fe", "zinc": "Zn",
-    "platinum": "Pt", "gold": "Au", "silver": "Ag", "palladium": "Pd",
-    "iridium": "Ir", "magnesium": "Mg", "az31": "Mg", "az91": "Mg",
-    "stainless steel": "Fe", "carbon steel": "Fe", "mild steel": "Fe",
-    "steel": "Fe", "316l": "Fe", "q235": "Fe", "chromium": "Cr",
-    "lead": "Pb",
-}
+_BASE_SYMBOLS, _NAME_TO_SYMBOL, _MATERIAL_ALIASES = build_text_recognition_tables()
 # 目標金屬一定要能被辨識（例如未來切換成其他金屬時）
 _NAME_TO_SYMBOL.setdefault(TARGET_METAL.lower(), METAL_SYMBOL)
 
@@ -510,51 +497,7 @@ MEASUREMENT_METHOD_PATTERN = re.compile(
 
  
 
-_MATERIAL_ALIASES: dict[str, str] = {
-
-    "copper": "Cu", "cu": "Cu",
-
-    "cobalt": "Co", "co": "Co",
-
-    "tungsten": "W", "wolfram": "W", "w": "W",
-
-    "ruthenium": "Ru", "ru": "Ru",
-
-    "titanium": "Ti", "ti": "Ti",
-
-    "tantalum": "Ta", "ta": "Ta",
-
-    "aluminum": "Al", "aluminium": "Al", "al": "Al",
-
-    "manganese": "Mn", "mn": "Mn",
-
-    "nickel": "Ni", "ni": "Ni",
-
-    "iron": "Fe", "fe": "Fe",
-
-    "zinc": "Zn", "zn": "Zn",
-
-    "molybdenum": "Mo", "mo": "Mo",
-
-    "titanium nitride": "TiN", "tantalum nitride": "TaN",
-
-    "cu2o": "Cu", "cuo": "Cu", "cu(oh)2": "Cu",
-
-    "coo": "Co", "co3o4": "Co",
-
-    "wo3": "W",
-
-    "ruo2": "Ru",
-
-    "tio2": "Ti",
-
-    "al2o3": "Al",
-
-    "ta2o5": "Ta",
-
-    "moo3": "Mo", "moo2": "Mo",
-
-}
+# _MATERIAL_ALIASES 已由上方 materials_loader.build_text_recognition_tables() 載入
 
  
 

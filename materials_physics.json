@@ -1,0 +1,771 @@
+{
+  "elements": {
+    "Ag": {
+      "atomic_number": 47,
+      "molar_mass_g_mol": 107.868,
+      "molar_volume_cm3_mol": 10.27,
+      "valence": 1,
+      "equivalent_weight_g_eq": 107.868,
+      "electronegativity_pauling": 1.93,
+      "work_function_eV": 4.26,
+      "standard_potential_V_SHE": 0.8,
+      "melting_point_K": 1234.9,
+      "oxide_formula": "Ag2O",
+      "oxide_stoichiometry": [
+        2,
+        1
+      ],
+      "passivation_pH": [
+        9.0,
+        13.5
+      ],
+      "transpassive_potential_V_SHE": 1.6,
+      "ion_acid": "Ag+(aq)",
+      "ion_alkaline": "AgO-(aq)",
+      "oxide_phase": "Ag2O(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "silver"
+      ]
+    },
+    "Al": {
+      "material_name": "Aluminum",
+      "category": "metal",
+      "atomic_number": 13,
+      "molar_mass_g_mol": 26.982,
+      "density_g_cm3": 2.7,
+      "molar_volume_cm3_mol": 10.0,
+      "valence": 3,
+      "equivalent_weight_g_eq": 8.994,
+      "electronegativity_pauling": 1.61,
+      "work_function_eV": 4.28,
+      "standard_potential_V_SHE": -1.662,
+      "melting_point_K": 933.5,
+      "oxide_formula": "Al2O3",
+      "oxide_stoichiometry": [
+        2,
+        3
+      ],
+      "oxide_type": "Al2O3",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.95,
+      "passivation_pH": [
+        4.0,
+        8.5
+      ],
+      "transpassive_potential_V_SHE": 2.0,
+      "ion_acid": "Al3+(aq)",
+      "ion_alkaline": "AlO2-(aq)",
+      "oxide_phase": "Al2O3/Al(OH)3(s)",
+      "crystal_structure": "FCC",
+      "thermal_conductivity_W_mK": 237,
+      "electrical_resistivity_ohm_cm": 2.65e-06,
+      "common_corrosion_products": "Al(OH)3, Al2O3",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "aluminum",
+        "aluminium"
+      ],
+      "aliases": [
+        "aluminum",
+        "aluminium",
+        "al2o3"
+      ]
+    },
+    "Au": {
+      "atomic_number": 79,
+      "molar_mass_g_mol": 196.967,
+      "molar_volume_cm3_mol": 10.21,
+      "valence": 3,
+      "equivalent_weight_g_eq": 65.656,
+      "electronegativity_pauling": 2.54,
+      "work_function_eV": 5.1,
+      "standard_potential_V_SHE": 1.498,
+      "melting_point_K": 1337.3,
+      "oxide_formula": "Au2O3",
+      "oxide_stoichiometry": [
+        2,
+        3
+      ],
+      "passivation_pH": [
+        2.0,
+        12.0
+      ],
+      "transpassive_potential_V_SHE": 1.8,
+      "ion_acid": "Au3+(aq)",
+      "ion_alkaline": "AuO2-(aq)",
+      "oxide_phase": "Au2O3(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "gold"
+      ]
+    },
+    "Co": {
+      "material_name": "Cobalt",
+      "category": "metal",
+      "atomic_number": 27,
+      "molar_mass_g_mol": 58.933,
+      "density_g_cm3": 8.9,
+      "molar_volume_cm3_mol": 6.67,
+      "valence": 2,
+      "equivalent_weight_g_eq": 29.466,
+      "electronegativity_pauling": 1.88,
+      "work_function_eV": 5.0,
+      "standard_potential_V_SHE": -0.277,
+      "melting_point_K": 1768.0,
+      "oxide_formula": "CoO",
+      "oxide_stoichiometry": [
+        1,
+        1
+      ],
+      "oxide_type": "CoO, Co3O4",
+      "oxide_stability": "medium",
+      "passivation_tendency": 0.5,
+      "passivation_pH": [
+        8.5,
+        13.5
+      ],
+      "transpassive_potential_V_SHE": 1.3,
+      "ion_acid": "Co2+(aq)",
+      "ion_alkaline": "HCoO2-(aq)",
+      "oxide_phase": "CoO/Co3O4(s)",
+      "crystal_structure": "HCP",
+      "thermal_conductivity_W_mK": 100,
+      "electrical_resistivity_ohm_cm": 6.24e-06,
+      "common_corrosion_products": "CoCl2, Co(OH)2",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "cobalt"
+      ],
+      "aliases": [
+        "cobalt",
+        "coo",
+        "co3o4"
+      ]
+    },
+    "Cr": {
+      "atomic_number": 24,
+      "molar_mass_g_mol": 51.996,
+      "molar_volume_cm3_mol": 7.23,
+      "valence": 3,
+      "equivalent_weight_g_eq": 17.332,
+      "electronegativity_pauling": 1.66,
+      "work_function_eV": 4.5,
+      "standard_potential_V_SHE": -0.744,
+      "melting_point_K": 2180.0,
+      "oxide_formula": "Cr2O3",
+      "oxide_stoichiometry": [
+        2,
+        3
+      ],
+      "passivation_pH": [
+        4.0,
+        12.5
+      ],
+      "transpassive_potential_V_SHE": 1.2,
+      "ion_acid": "Cr3+(aq)",
+      "ion_alkaline": "CrO4^2-(aq)",
+      "oxide_phase": "Cr2O3(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "chromium"
+      ]
+    },
+    "Cu": {
+      "material_name": "Copper",
+      "category": "metal",
+      "atomic_number": 29,
+      "molar_mass_g_mol": 63.546,
+      "density_g_cm3": 8.96,
+      "molar_volume_cm3_mol": 7.11,
+      "valence": 2,
+      "equivalent_weight_g_eq": 31.773,
+      "electronegativity_pauling": 1.9,
+      "work_function_eV": 4.65,
+      "standard_potential_V_SHE": 0.342,
+      "melting_point_K": 1357.8,
+      "oxide_formula": "Cu2O",
+      "oxide_stoichiometry": [
+        2,
+        1
+      ],
+      "oxide_type": "CuO, Cu2O",
+      "oxide_stability": "low",
+      "passivation_tendency": 0.4,
+      "passivation_pH": [
+        7.0,
+        13.0
+      ],
+      "transpassive_potential_V_SHE": 1.4,
+      "ion_acid": "Cu2+(aq)",
+      "ion_alkaline": "HCuO2-(aq)",
+      "oxide_phase": "Cu2O/CuO(s)",
+      "crystal_structure": "FCC",
+      "thermal_conductivity_W_mK": 401,
+      "electrical_resistivity_ohm_cm": 1.68e-06,
+      "common_corrosion_products": "CuCl2, Cu(OH)2, CuO",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "copper"
+      ],
+      "aliases": [
+        "copper",
+        "cu2o",
+        "cuo",
+        "cu(oh)2"
+      ]
+    },
+    "Fe": {
+      "atomic_number": 26,
+      "molar_mass_g_mol": 55.845,
+      "molar_volume_cm3_mol": 7.09,
+      "valence": 2,
+      "equivalent_weight_g_eq": 27.922,
+      "electronegativity_pauling": 1.83,
+      "work_function_eV": 4.5,
+      "standard_potential_V_SHE": -0.447,
+      "melting_point_K": 1811.0,
+      "oxide_formula": "Fe2O3",
+      "oxide_stoichiometry": [
+        2,
+        3
+      ],
+      "passivation_pH": [
+        8.5,
+        13.0
+      ],
+      "transpassive_potential_V_SHE": 1.5,
+      "ion_acid": "Fe2+(aq)",
+      "ion_alkaline": "HFeO2-(aq)",
+      "oxide_phase": "Fe2O3/Fe3O4(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "iron",
+        "stainless steel",
+        "carbon steel",
+        "mild steel",
+        "steel",
+        "316l",
+        "q235"
+      ],
+      "aliases": [
+        "iron"
+      ]
+    },
+    "Ir": {
+      "is_base_symbol": true,
+      "name_aliases": [
+        "iridium"
+      ]
+    },
+    "Mg": {
+      "atomic_number": 12,
+      "molar_mass_g_mol": 24.305,
+      "molar_volume_cm3_mol": 14.0,
+      "valence": 2,
+      "equivalent_weight_g_eq": 12.152,
+      "electronegativity_pauling": 1.31,
+      "work_function_eV": 3.66,
+      "standard_potential_V_SHE": -2.372,
+      "melting_point_K": 923.0,
+      "oxide_formula": "MgO",
+      "oxide_stoichiometry": [
+        1,
+        1
+      ],
+      "passivation_pH": [
+        11.5,
+        14.0
+      ],
+      "transpassive_potential_V_SHE": 2.0,
+      "ion_acid": "Mg2+(aq)",
+      "ion_alkaline": "Mg(OH)2(s)",
+      "oxide_phase": "Mg(OH)2(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "magnesium",
+        "az31",
+        "az91"
+      ]
+    },
+    "Mn": {
+      "material_name": "Manganese",
+      "category": "metal",
+      "atomic_number": 25,
+      "molar_mass_g_mol": 54.938,
+      "density_g_cm3": 7.21,
+      "molar_volume_cm3_mol": 7.35,
+      "valence": 2,
+      "equivalent_weight_g_eq": 27.469,
+      "electronegativity_pauling": 1.55,
+      "work_function_eV": 4.1,
+      "standard_potential_V_SHE": -1.185,
+      "melting_point_K": 1519.0,
+      "oxide_formula": "MnO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "oxide_type": "MnO2, Mn3O4",
+      "oxide_stability": "medium",
+      "passivation_tendency": 0.5,
+      "passivation_pH": [
+        9.5,
+        13.5
+      ],
+      "transpassive_potential_V_SHE": 1.5,
+      "ion_acid": "Mn2+(aq)",
+      "ion_alkaline": "MnO4-(aq)",
+      "oxide_phase": "MnO2/Mn(OH)2(s)",
+      "crystal_structure": "BCC",
+      "thermal_conductivity_W_mK": 7.81,
+      "electrical_resistivity_ohm_cm": 0.000144,
+      "common_corrosion_products": "MnO2, Mn(OH)2",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "manganese"
+      ],
+      "aliases": [
+        "manganese"
+      ]
+    },
+    "Mo": {
+      "material_name": "Molybdenum",
+      "category": "metal",
+      "atomic_number": 42,
+      "molar_mass_g_mol": 95.95,
+      "density_g_cm3": 10.28,
+      "molar_volume_cm3_mol": 9.38,
+      "valence": 4,
+      "equivalent_weight_g_eq": 23.988,
+      "electronegativity_pauling": 2.16,
+      "work_function_eV": 4.6,
+      "standard_potential_V_SHE": -0.2,
+      "melting_point_K": 2896.0,
+      "oxide_formula": "MoO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "oxide_type": "MoO3, MoO2",
+      "oxide_stability": "medium",
+      "passivation_tendency": 0.6,
+      "passivation_pH": [
+        0.5,
+        4.5
+      ],
+      "transpassive_potential_V_SHE": 1.2,
+      "ion_acid": "Mo3+(aq)",
+      "ion_alkaline": "MoO4^2-(aq)",
+      "oxide_phase": "MoO2/MoO3(s)",
+      "crystal_structure": "BCC",
+      "thermal_conductivity_W_mK": 138,
+      "electrical_resistivity_ohm_cm": 5.17e-06,
+      "common_corrosion_products": "MoO3, MoO4^2-, H2MoO4",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "molybdenum"
+      ],
+      "aliases": [
+        "molybdenum",
+        "moo3",
+        "moo2"
+      ]
+    },
+    "Ni": {
+      "atomic_number": 28,
+      "molar_mass_g_mol": 58.693,
+      "molar_volume_cm3_mol": 6.59,
+      "valence": 2,
+      "equivalent_weight_g_eq": 29.346,
+      "electronegativity_pauling": 1.91,
+      "work_function_eV": 5.15,
+      "standard_potential_V_SHE": -0.257,
+      "melting_point_K": 1728.0,
+      "oxide_formula": "NiO",
+      "oxide_stoichiometry": [
+        1,
+        1
+      ],
+      "passivation_pH": [
+        8.0,
+        13.5
+      ],
+      "transpassive_potential_V_SHE": 1.4,
+      "ion_acid": "Ni2+(aq)",
+      "ion_alkaline": "HNiO2-(aq)",
+      "oxide_phase": "NiO/Ni(OH)2(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "nickel"
+      ],
+      "aliases": [
+        "nickel"
+      ]
+    },
+    "Pb": {
+      "is_base_symbol": true,
+      "name_aliases": [
+        "lead"
+      ]
+    },
+    "Pd": {
+      "is_base_symbol": true,
+      "name_aliases": [
+        "palladium"
+      ]
+    },
+    "Pt": {
+      "atomic_number": 78,
+      "molar_mass_g_mol": 195.084,
+      "molar_volume_cm3_mol": 9.09,
+      "valence": 2,
+      "equivalent_weight_g_eq": 97.542,
+      "electronegativity_pauling": 2.28,
+      "work_function_eV": 5.65,
+      "standard_potential_V_SHE": 1.188,
+      "melting_point_K": 2041.4,
+      "oxide_formula": "PtO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "passivation_pH": [
+        1.0,
+        13.0
+      ],
+      "transpassive_potential_V_SHE": 1.8,
+      "ion_acid": "Pt2+(aq)",
+      "ion_alkaline": "PtO3^2-(aq)",
+      "oxide_phase": "PtO2(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "platinum"
+      ]
+    },
+    "Ru": {
+      "material_name": "Ruthenium",
+      "category": "metal",
+      "atomic_number": 44,
+      "molar_mass_g_mol": 101.07,
+      "density_g_cm3": 12.37,
+      "molar_volume_cm3_mol": 8.17,
+      "valence": 3,
+      "equivalent_weight_g_eq": 33.69,
+      "electronegativity_pauling": 2.2,
+      "work_function_eV": 4.71,
+      "standard_potential_V_SHE": 0.455,
+      "melting_point_K": 2607.0,
+      "oxide_formula": "RuO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "oxide_type": "RuO2",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.8,
+      "passivation_pH": [
+        2.0,
+        12.5
+      ],
+      "transpassive_potential_V_SHE": 1.35,
+      "transpassive_phase": "RuO4(aq)",
+      "ion_acid": "Ru3+(aq)",
+      "ion_alkaline": "RuO4^2-(aq)",
+      "oxide_phase": "RuO2(s)",
+      "crystal_structure": "HCP",
+      "thermal_conductivity_W_mK": 117,
+      "electrical_resistivity_ohm_cm": 7.1e-06,
+      "common_corrosion_products": "RuO4",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "ruthenium"
+      ],
+      "aliases": [
+        "ruthenium",
+        "ruo2"
+      ]
+    },
+    "Si": {
+      "atomic_number": 14,
+      "molar_mass_g_mol": 28.085,
+      "molar_volume_cm3_mol": 12.06,
+      "valence": 4,
+      "equivalent_weight_g_eq": 7.021,
+      "electronegativity_pauling": 1.9,
+      "work_function_eV": 4.85,
+      "standard_potential_V_SHE": -0.857,
+      "melting_point_K": 1687.0,
+      "oxide_formula": "SiO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "passivation_pH": [
+        0.0,
+        9.5
+      ],
+      "transpassive_potential_V_SHE": 2.5,
+      "ion_acid": "SiO2(s)",
+      "ion_alkaline": "SiO3^2-(aq)",
+      "oxide_phase": "SiO2(s)"
+    },
+    "Sn": {
+      "atomic_number": 50,
+      "molar_mass_g_mol": 118.71,
+      "molar_volume_cm3_mol": 16.29,
+      "valence": 2,
+      "equivalent_weight_g_eq": 59.355,
+      "electronegativity_pauling": 1.96,
+      "work_function_eV": 4.42,
+      "standard_potential_V_SHE": -0.138,
+      "melting_point_K": 505.1,
+      "oxide_formula": "SnO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "passivation_pH": [
+        3.5,
+        10.5
+      ],
+      "transpassive_potential_V_SHE": 1.8,
+      "ion_acid": "Sn2+(aq)",
+      "ion_alkaline": "SnO3^2-(aq)",
+      "oxide_phase": "SnO2(s)",
+      "is_base_symbol": true
+    },
+    "Ta": {
+      "material_name": "Tantalum",
+      "category": "barrier",
+      "atomic_number": 73,
+      "molar_mass_g_mol": 180.948,
+      "density_g_cm3": 16.69,
+      "molar_volume_cm3_mol": 10.85,
+      "valence": 5,
+      "equivalent_weight_g_eq": 36.19,
+      "electronegativity_pauling": 1.5,
+      "work_function_eV": 4.25,
+      "standard_potential_V_SHE": -0.75,
+      "melting_point_K": 3290.0,
+      "oxide_formula": "Ta2O5",
+      "oxide_stoichiometry": [
+        2,
+        5
+      ],
+      "oxide_type": "Ta2O5",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.9,
+      "passivation_pH": [
+        0.0,
+        14.0
+      ],
+      "transpassive_potential_V_SHE": 2.5,
+      "ion_acid": "Ta5+(aq)",
+      "ion_alkaline": "TaO3-(aq)",
+      "oxide_phase": "Ta2O5(s)",
+      "crystal_structure": "BCC",
+      "thermal_conductivity_W_mK": 57.5,
+      "electrical_resistivity_ohm_cm": 1.31e-05,
+      "common_corrosion_products": "Ta2O5",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "tantalum"
+      ],
+      "aliases": [
+        "tantalum",
+        "ta2o5"
+      ]
+    },
+    "Ti": {
+      "material_name": "Titanium",
+      "category": "metal",
+      "atomic_number": 22,
+      "molar_mass_g_mol": 47.867,
+      "density_g_cm3": 4.51,
+      "molar_volume_cm3_mol": 10.64,
+      "valence": 4,
+      "equivalent_weight_g_eq": 11.967,
+      "electronegativity_pauling": 1.54,
+      "work_function_eV": 4.33,
+      "standard_potential_V_SHE": -1.63,
+      "melting_point_K": 1941.0,
+      "oxide_formula": "TiO2",
+      "oxide_stoichiometry": [
+        1,
+        2
+      ],
+      "oxide_type": "TiO2",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.9,
+      "passivation_pH": [
+        1.5,
+        13.5
+      ],
+      "transpassive_potential_V_SHE": 2.2,
+      "ion_acid": "Ti3+(aq)",
+      "ion_alkaline": "HTiO3-(aq)",
+      "oxide_phase": "TiO2(s)",
+      "crystal_structure": "HCP",
+      "thermal_conductivity_W_mK": 21.9,
+      "electrical_resistivity_ohm_cm": 4.2e-05,
+      "common_corrosion_products": "TiO2, Ti(OH)4",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "titanium"
+      ],
+      "aliases": [
+        "titanium",
+        "tio2"
+      ]
+    },
+    "W": {
+      "material_name": "Tungsten",
+      "category": "metal",
+      "atomic_number": 74,
+      "molar_mass_g_mol": 183.84,
+      "density_g_cm3": 19.25,
+      "molar_volume_cm3_mol": 9.47,
+      "valence": 6,
+      "equivalent_weight_g_eq": 30.64,
+      "electronegativity_pauling": 2.36,
+      "work_function_eV": 4.55,
+      "standard_potential_V_SHE": -0.09,
+      "melting_point_K": 3695.0,
+      "oxide_formula": "WO3",
+      "oxide_stoichiometry": [
+        1,
+        3
+      ],
+      "oxide_type": "WO3",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.7,
+      "passivation_pH": [
+        0.0,
+        4.0
+      ],
+      "transpassive_potential_V_SHE": 1.8,
+      "ion_acid": "WO2+(aq)",
+      "ion_alkaline": "WO4^2-(aq)",
+      "oxide_phase": "WO3(s)",
+      "crystal_structure": "BCC",
+      "thermal_conductivity_W_mK": 173,
+      "electrical_resistivity_ohm_cm": 5.28e-06,
+      "common_corrosion_products": "WO3, WO4^2-",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "tungsten",
+        "wolfram"
+      ],
+      "aliases": [
+        "tungsten",
+        "wolfram",
+        "wo3"
+      ]
+    },
+    "Zn": {
+      "atomic_number": 30,
+      "molar_mass_g_mol": 65.38,
+      "molar_volume_cm3_mol": 9.16,
+      "valence": 2,
+      "equivalent_weight_g_eq": 32.69,
+      "electronegativity_pauling": 1.65,
+      "work_function_eV": 4.33,
+      "standard_potential_V_SHE": -0.762,
+      "melting_point_K": 692.7,
+      "oxide_formula": "ZnO",
+      "oxide_stoichiometry": [
+        1,
+        1
+      ],
+      "passivation_pH": [
+        8.5,
+        12.0
+      ],
+      "transpassive_potential_V_SHE": 1.8,
+      "ion_acid": "Zn2+(aq)",
+      "ion_alkaline": "ZnO2^2-(aq)",
+      "oxide_phase": "ZnO/Zn(OH)2(s)",
+      "is_base_symbol": true,
+      "name_aliases": [
+        "zinc"
+      ],
+      "aliases": [
+        "zinc"
+      ]
+    }
+  },
+  "compounds": {
+    "TaN": {
+      "base_element": "Ta",
+      "mp_formula": "TaN",
+      "material_name": "Tantalum Nitride",
+      "category": "barrier",
+      "density_g_cm3": 14.3,
+      "molar_mass_g_mol": 194.95,
+      "valence": 5,
+      "equivalent_weight_g_eq": 38.99,
+      "electronegativity_pauling": 1.5,
+      "work_function_eV": 4.4,
+      "standard_potential_V_SHE": 0.1,
+      "melting_point_K": 3363.15,
+      "oxide_type": "Ta2O5",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.9,
+      "passivation_pH": [
+        1.0,
+        13.0
+      ],
+      "oxide_phase": "Ta2O5/TaOxNy(s)",
+      "crystal_structure": "NaCl-type",
+      "thermal_conductivity_W_mK": 8.0,
+      "electrical_resistivity_ohm_cm": 0.000135,
+      "common_corrosion_products": "Ta2O5",
+      "name_aliases": [
+        "tantalum nitride"
+      ],
+      "aliases": [
+        "tantalum nitride"
+      ]
+    },
+    "TiN": {
+      "base_element": "Ti",
+      "mp_formula": "TiN",
+      "material_name": "Titanium Nitride",
+      "category": "barrier",
+      "density_g_cm3": 5.22,
+      "molar_mass_g_mol": 61.87,
+      "valence": 3,
+      "equivalent_weight_g_eq": 20.62,
+      "electronegativity_pauling": 1.54,
+      "work_function_eV": 4.5,
+      "standard_potential_V_SHE": 0.15,
+      "melting_point_K": 3203.15,
+      "oxide_type": "TiO2",
+      "oxide_stability": "high",
+      "passivation_tendency": 0.85,
+      "passivation_pH": [
+        2.0,
+        12.0
+      ],
+      "oxide_phase": "TiO2/TiOxNy(s)",
+      "crystal_structure": "NaCl-type",
+      "thermal_conductivity_W_mK": 19.2,
+      "electrical_resistivity_ohm_cm": 2.5e-05,
+      "common_corrosion_products": "TiO2",
+      "name_aliases": [
+        "titanium nitride"
+      ],
+      "aliases": [
+        "titanium nitride"
+      ]
+    },
+    "WN": {
+      "base_element": "W",
+      "mp_formula": "WN",
+      "name_aliases": [
+        "tungsten nitride"
+      ]
+    }
+  }
+}

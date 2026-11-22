@@ -210,7 +210,12 @@ def main():
     parser.add_argument(
         "--list",
         action="store_true",
-        help="列出 config.py 中所有可用金屬預設與目前 METALS_TO_RUN",
+        help="列出 metals_db.json 中所有可用金屬預設與目前 METALS_TO_RUN",
+    )
+    parser.add_argument(
+        "--check-db",
+        action="store_true",
+        help="檢查 metals_db.json 與 materials_physics.json 的完整性與一致性",
     )
     parser.add_argument(
         "--single-metal",
@@ -227,6 +232,24 @@ def main():
     # 靜默讀取 config（避免協調器印出重複的預設金屬 banner 或建多餘資料夾）
     os.environ["TAFEL_QUIET_CONFIG"] = "1"
     import config
+
+    if args.check_db:
+        from materials_loader import validate_databases
+
+        errors, warnings = validate_databases(config.METALS_TO_RUN)
+        if errors:
+            print(f"❌ 發現 {len(errors)} 項錯誤：")
+            for err in errors:
+                print(f"  [ERROR] {err}")
+        if warnings:
+            print(f"⚠️  發現 {len(warnings)} 項提醒：")
+            for warn in warnings:
+                print(f"  [WARN]  {warn}")
+        if not errors and not warnings:
+            print("✅ metals_db.json 與 materials_physics.json 檢查全數通過！")
+        elif not errors:
+            print("✅ 無阻擋性錯誤（Step 1~4 可正常執行；上述提醒僅影響 Step 5~7 物性特徵）。")
+        sys.exit(1 if errors else 0)
 
     if args.list:
         print("Available METAL_PRESETS:")
