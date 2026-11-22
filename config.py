@@ -5,6 +5,7 @@
 ========================================
 """
 
+import json as _json
 import os
 import re as _re
 from pathlib import Path as _Path
@@ -81,238 +82,42 @@ ENABLE_MP_API = True
 MP_API_KEY = os.environ.get("MP_API_KEY", "")
 
 # ============================================================
-#  2. 多金屬預設表與批次執行清單（✏️ 改這裡就能增減金屬）
+#  2. 多金屬預設表與批次執行清單（金屬資料庫獨立於 metals_db.json）
 # ============================================================
 
-METAL_PRESETS: dict[str, dict] = {
-    "Cu": {
-        "target_metal": "copper",
-        "compounds": [
-            "Cu2O", "CuO", "Cu(OH)2",
-            "CuS", "Cu2S", "CuSe", "Cu3P",
-            "Cu-Ni", "Cu-Zn", "Cu-Al", "Cu-Ti",
-            "copper foam", "copper foil",
-            "copper nanowire", "copper nanoparticle",
-            "copper thin film", "copper alloy",
-        ],
-        "cmp_queries": [
-            '"copper" "CMP" "potentiodynamic polarization"',
-            '"copper" "chemical mechanical" "H2O2" "Tafel"',
-            '"copper" "glycine" "H2O2" "potentiodynamic"',
-            '"copper" "BTA" "slurry" "Ecorr"',
-            '"copper" "wet etching" "H2O2" "polarization"',
-        ],
-    },
-    "Co": {
-        "target_metal": "cobalt",
-        "compounds": [
-            "Co3O4", "CoO", "CoOOH", "Co(OH)2",
-            "CoP", "Co2P", "CoS2", "CoSe2", "Co9S8",
-            "CoN", "Co3C", "CoFe", "CoNi", "CoMo",
-            "CoFe2O4", "ZIF-67", "Co-MOF",
-            "cobalt phosphide", "cobalt sulfide",
-            "cobalt oxide", "cobalt hydroxide",
-        ],
-        "cmp_queries": [
-            '"cobalt" "CMP" "potentiodynamic polarization"',
-            '"cobalt" "chemical mechanical" "H2O2" "Tafel"',
-            '"cobalt" "slurry" "corrosion current" "Ecorr"',
-            '"cobalt" "glycine" "H2O2" "polarization"',
-            '"cobalt" "BTA" "potentiodynamic" "CMP"',
-            '"cobalt" "galvanic corrosion" "copper" "CMP"',
-            '"cobalt" "wet etching" "potentiodynamic"',
-        ],
-    },
-    "W": {
-        "target_metal": "tungsten",
-        "compounds": [
-            "WC", "W2C", "WS2", "WSe2",
-            "WO3", "WO2", "WP", "WN", "W2N",
-            "NiW", "CoW", "MoW",
-            "tungsten carbide", "tungsten disulfide",
-            "tungsten oxide", "tungsten phosphide",
-            "tungsten nitride", "tungsten thin film",
-        ],
-        "cmp_queries": [
-            '"tungsten" "CMP" "potentiodynamic polarization"',
-            '"tungsten" "chemical mechanical" "H2O2" "Tafel"',
-            '"tungsten" "Fe(NO3)3" "potentiodynamic"',
-            '"tungsten" "ferric nitrate" "polarization" "CMP"',
-            '"tungsten" "KIO3" "potentiodynamic"',
-            '"tungsten" "slurry" "corrosion current"',
-            '"tungsten" "wet etching" "H2O2" "polarization"',
-        ],
-    },
-    "Ru": {
-        "target_metal": "ruthenium",
-        "compounds": [
-            "RuO2", "RuP", "RuP2", "RuS2", "RuSe2",
-            "RuIr", "RuCo", "RuNi",
-            "Ru/C", "SrRuO3",
-            "Ru single atom", "Ru-SA",
-            "ruthenium oxide", "ruthenium dioxide",
-            "ruthenium nanoparticle",
-        ],
-        "cmp_queries": [
-            '"ruthenium" "CMP" "potentiodynamic polarization"',
-            '"ruthenium" "chemical mechanical" "Tafel"',
-            '"ruthenium" "KIO4" "potentiodynamic"',
-            '"ruthenium" "periodate" "polarization" "slurry"',
-            '"ruthenium" "NaClO" "potentiodynamic"',
-            '"ruthenium" "hypochlorite" "corrosion" "CMP"',
-            '"ruthenium" "H2O2" "potentiodynamic polarization"',
-            '"ruthenium" "persulfate" "polarization"',
-            '"ruthenium" "wet etching" "potentiodynamic"',
-            '"ruthenium" "galvanic corrosion" "copper" "CMP"',
-        ],
-    },
-    "Ti": {
-        "target_metal": "titanium",
-        "compounds": [
-            "TiO2", "Ti2O3", "TiO",
-            "TiN", "TiC", "TiB2",
-            "TiS2", "TiSe2",
-            "Ti-6Al-4V", "Ti-Ni", "Ti-Cu", "Ti-Ta",
-            "titanium dioxide", "titanium oxide",
-            "titanium nitride", "titanium carbide",
-            "titanium foil", "titanium alloy",
-            "titanium implant", "titanium substrate",
-            "anodized titanium", "titanium nanotube",
-        ],
-        "cmp_queries": [
-            '"titanium" "CMP" "potentiodynamic polarization"',
-            '"titanium" "H2O2" "potentiodynamic polarization"',
-            '"titanium" "HF" "wet etching" "polarization"',
-            '"titanium" "slurry" "corrosion current"',
-        ],
-    },
-    "TiN": {
-        "target_metal": "titanium nitride",
-        "compounds": [
-            "TiN", "Ti2N",
-            "TiN thin film", "TiN coating",
-            "TiN nanoparticle", "TiN nanotube",
-            "TiN electrode", "TiN substrate",
-            "TiAlN", "TiCN", "TiSiN",
-            "TiN/Si", "TiN/Ti", "TiN/Cu",
-            "titanium nitride film",
-            "titanium nitride coating",
-            "titanium nitride electrode",
-            "reactive sputtering TiN",
-            "PVD TiN", "CVD TiN", "ALD TiN",
-        ],
-        "cmp_queries": [
-            '"titanium nitride" "CMP" "potentiodynamic"',
-            '"TiN" "CMP" "potentiodynamic polarization"',
-            '"titanium nitride" "wet etching" "H2O2"',
-            '"TiN" "H2O2" "potentiodynamic polarization"',
-            '"TiN" "SC-1" "polarization" etching',
-            '"TiN" "NH4OH" "H2O2" "corrosion"',
-            '"titanium nitride" "oxidizer" "Tafel"',
-            '"TiN" "slurry" "corrosion current" "Ecorr"',
-        ],
-    },
-    "TaN": {
-        "target_metal": "tantalum nitride",
-        "compounds": [
-            "TaN", "Ta3N5", "Ta2N",
-            "TaN thin film", "TaN coating",
-            "TaN electrode", "TaN barrier",
-            "TaN nanoparticle",
-            "TaN/Si", "TaN/Cu", "TaN/Ti",
-            "tantalum nitride film",
-            "tantalum nitride coating",
-            "tantalum nitride electrode",
-            "tantalum nitride barrier",
-            "reactive sputtering TaN",
-            "PVD TaN", "CVD TaN", "ALD TaN",
-            "TaTiN", "TaSiN", "TaAlN",
-        ],
-        "cmp_queries": [
-            '"tantalum nitride" "CMP" "potentiodynamic"',
-            '"TaN" "barrier" "CMP" "potentiodynamic"',
-            '"TaN" "H2O2" "potentiodynamic polarization"',
-            '"TaN" "slurry" "Tafel" corrosion',
-            '"TaN" "galvanic corrosion" "copper" "CMP"',
-        ],
-    },
-    "Al": {
-        "target_metal": "aluminum",
-        "compounds": [
-            "Al2O3", "AlOOH", "Al(OH)3",
-            "AlN", "AlP",
-            "Al-Cu", "Al-Mg", "Al-Zn", "Al-Si", "Al-Ti",
-            "AA2024", "AA7075", "AA6061", "AA5052",
-            "aluminum alloy", "aluminium alloy",
-            "aluminum oxide", "aluminium oxide",
-            "aluminum foil", "aluminium foil",
-            "anodized aluminum", "anodized aluminium",
-            "aluminum coating", "aluminium coating",
-        ],
-        "cmp_queries": [
-            '"aluminum" "CMP" "potentiodynamic polarization"',
-            '"aluminum" "wet etching" "potentiodynamic"',
-            '"aluminum" "H2O2" "slurry" "Tafel"',
-        ],
-    },
-    "Ta": {
-        "target_metal": "tantalum",
-        "compounds": [
-            "Ta2O5", "TaO2", "TaON",
-            "TaN", "Ta3N5", "Ta2N",
-            "TaC", "TaB2", "TaS2", "TaSe2",
-            "Ta-Ti", "Ta-W", "Ta-Cu",
-            "tantalum oxide", "tantalum pentoxide",
-            "tantalum nitride", "tantalum carbide",
-            "tantalum foil", "tantalum thin film",
-            "tantalum electrode", "tantalum capacitor",
-            "anodized tantalum",
-        ],
-        "cmp_queries": [
-            '"tantalum" "CMP" "potentiodynamic polarization"',
-            '"tantalum" "H2O2" "slurry" "Tafel"',
-            '"tantalum" "barrier" "galvanic corrosion" "CMP"',
-        ],
-    },
-    "Mn": {
-        "target_metal": "manganese",
-        "compounds": [
-            "MnO2", "Mn2O3", "Mn3O4", "MnO", "MnOOH",
-            "MnS", "MnSe", "MnP",
-            "MnFe2O4", "MnCo2O4", "MnNiO",
-            "NiMn", "CoMn", "FeMn",
-            "manganese oxide", "manganese dioxide",
-            "manganese phosphide", "manganese sulfide",
-            "MnO2 nanosheet", "MnO2 nanowire",
-            "birnessite", "spinel manganese",
-            "manganese steel",
-        ],
-        "cmp_queries": [
-            '"manganese" "CMP" "potentiodynamic"',
-            '"manganese" "H2O2" "potentiodynamic polarization"',
-        ],
-    },
-    "Mo": {
-        "target_metal": "molybdenum",
-        "compounds": [
-            "MoS2", "MoSe2", "MoTe2",
-            "MoO2", "MoO3",
-            "Mo2C", "MoC", "MoN", "MoP", "Mo2N",
-            "NiMo", "CoMo", "FeMo",
-            "1T-MoS2", "2H-MoS2",
-            "molybdenum disulfide", "molybdenum carbide",
-            "molybdenum phosphide", "molybdenum oxide",
-            "molybdenum nitride",
-            "MoS2 nanosheet", "MoS2 edge",
-        ],
-        "cmp_queries": [
-            '"molybdenum" "CMP" "potentiodynamic polarization"',
-            '"molybdenum" "H2O2" "potentiodynamic polarization"',
-            '"molybdenum" "wet etching" "Tafel"',
-            '"molybdenum" "slurry" "corrosion current"',
-        ],
-    },
-}
+METALS_DB_PATH = _Path(__file__).resolve().parent / "metals_db.json"
+
+
+def _load_metals_db(
+    db_path: _Path,
+) -> tuple[dict[str, dict], dict[str, tuple[float, float]]]:
+    """從 metals_db.json 載入各金屬搜尋預設與 Ecorr 合理電位區間。"""
+    with db_path.open("r", encoding="utf-8") as f:
+        raw = _json.load(f)
+
+    default_range = raw.get("default_ecorr_valid_range_v_she", [-2.0, 2.0])
+    presets: dict[str, dict] = {}
+    ecorr_ranges: dict[str, tuple[float, float]] = {}
+
+    for sym, entry in raw["metals"].items():
+        if "target_metal" not in entry or "compounds" not in entry:
+            raise ValueError(
+                f"metals_db.json 中的金屬 '{sym}' 缺少 target_metal 或 compounds"
+            )
+        presets[sym] = {
+            "target_metal": entry["target_metal"],
+            "compounds": list(entry["compounds"]),
+            "cmp_queries": list(entry.get("cmp_queries", [])),
+        }
+        if "ecorr_valid_range_v_she" in entry:
+            lo, hi = entry["ecorr_valid_range_v_she"]
+            ecorr_ranges[sym] = (float(lo), float(hi))
+
+    ecorr_ranges["default"] = (float(default_range[0]), float(default_range[1]))
+    return presets, ecorr_ranges
+
+
+METAL_PRESETS, ECORR_VALID_RANGE_V_SHE = _load_metals_db(METALS_DB_PATH)
 
 # ✏️ 執行 `python run_all.py` 時要批次跑的金屬清單（可註解掉不想跑的金屬）
 #    也可透過命令列臨時覆蓋，例如：python run_all.py Cu Co W
@@ -497,21 +302,7 @@ CONTEXT_WINDOW = 150
 # ✏️ True = 自動過濾超出物理合理區間的離群值（被濾除的筆數會另存於 *_filtered_outliers.csv）
 FILTER_OUTLIERS = True
 
-# ✏️ 各金屬 Ecorr (V vs SHE) 合理腐蝕電位區間（超出者視為異質基材主導或誤抓數值）
-ECORR_VALID_RANGE_V_SHE: dict[str, tuple[float, float]] = {
-    "Cu": (-0.6, 0.8),
-    "Co": (-1.0, 0.6),
-    "W": (-1.0, 0.8),
-    "Ru": (-0.5, 1.4),
-    "Ti": (-1.2, 0.8),
-    "TiN": (-0.8, 1.0),
-    "TaN": (-0.8, 1.0),
-    "Al": (-1.8, 0.2),
-    "Ta": (-1.2, 0.8),
-    "Mn": (-1.5, 0.6),
-    "Mo": (-1.0, 0.8),
-    "default": (-2.0, 2.0),
-}
+# 各金屬 Ecorr (V vs SHE) 合理腐蝕電位區間已由上方 metals_db.json 載入為 ECORR_VALID_RANGE_V_SHE
 
 # ✏️ icorr (µA/cm²) 合理區間
 ICORR_VALID_RANGE_UA_CM2: tuple[float, float] = (1e-4, 1e6)

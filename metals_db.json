@@ -1,0 +1,414 @@
+{
+  "default_ecorr_valid_range_v_she": [
+    -2.0,
+    2.0
+  ],
+  "metals": {
+    "Cu": {
+      "target_metal": "copper",
+      "ecorr_valid_range_v_she": [
+        -0.6,
+        0.8
+      ],
+      "compounds": [
+        "Cu2O",
+        "CuO",
+        "Cu(OH)2",
+        "CuS",
+        "Cu2S",
+        "CuSe",
+        "Cu3P",
+        "Cu-Ni",
+        "Cu-Zn",
+        "Cu-Al",
+        "Cu-Ti",
+        "copper foam",
+        "copper foil",
+        "copper nanowire",
+        "copper nanoparticle",
+        "copper thin film",
+        "copper alloy"
+      ],
+      "cmp_queries": [
+        "\"copper\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"copper\" \"chemical mechanical\" \"H2O2\" \"Tafel\"",
+        "\"copper\" \"glycine\" \"H2O2\" \"potentiodynamic\"",
+        "\"copper\" \"BTA\" \"slurry\" \"Ecorr\"",
+        "\"copper\" \"wet etching\" \"H2O2\" \"polarization\""
+      ]
+    },
+    "Co": {
+      "target_metal": "cobalt",
+      "ecorr_valid_range_v_she": [
+        -1.0,
+        0.6
+      ],
+      "compounds": [
+        "Co3O4",
+        "CoO",
+        "CoOOH",
+        "Co(OH)2",
+        "CoP",
+        "Co2P",
+        "CoS2",
+        "CoSe2",
+        "Co9S8",
+        "CoN",
+        "Co3C",
+        "CoFe",
+        "CoNi",
+        "CoMo",
+        "CoFe2O4",
+        "ZIF-67",
+        "Co-MOF",
+        "cobalt phosphide",
+        "cobalt sulfide",
+        "cobalt oxide",
+        "cobalt hydroxide"
+      ],
+      "cmp_queries": [
+        "\"cobalt\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"cobalt\" \"chemical mechanical\" \"H2O2\" \"Tafel\"",
+        "\"cobalt\" \"slurry\" \"corrosion current\" \"Ecorr\"",
+        "\"cobalt\" \"glycine\" \"H2O2\" \"polarization\"",
+        "\"cobalt\" \"BTA\" \"potentiodynamic\" \"CMP\"",
+        "\"cobalt\" \"galvanic corrosion\" \"copper\" \"CMP\"",
+        "\"cobalt\" \"wet etching\" \"potentiodynamic\""
+      ]
+    },
+    "W": {
+      "target_metal": "tungsten",
+      "ecorr_valid_range_v_she": [
+        -1.0,
+        0.8
+      ],
+      "compounds": [
+        "WC",
+        "W2C",
+        "WS2",
+        "WSe2",
+        "WO3",
+        "WO2",
+        "WP",
+        "WN",
+        "W2N",
+        "NiW",
+        "CoW",
+        "MoW",
+        "tungsten carbide",
+        "tungsten disulfide",
+        "tungsten oxide",
+        "tungsten phosphide",
+        "tungsten nitride",
+        "tungsten thin film"
+      ],
+      "cmp_queries": [
+        "\"tungsten\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"tungsten\" \"chemical mechanical\" \"H2O2\" \"Tafel\"",
+        "\"tungsten\" \"Fe(NO3)3\" \"potentiodynamic\"",
+        "\"tungsten\" \"ferric nitrate\" \"polarization\" \"CMP\"",
+        "\"tungsten\" \"KIO3\" \"potentiodynamic\"",
+        "\"tungsten\" \"slurry\" \"corrosion current\"",
+        "\"tungsten\" \"wet etching\" \"H2O2\" \"polarization\""
+      ]
+    },
+    "Ru": {
+      "target_metal": "ruthenium",
+      "ecorr_valid_range_v_she": [
+        -0.5,
+        1.4
+      ],
+      "compounds": [
+        "RuO2",
+        "RuP",
+        "RuP2",
+        "RuS2",
+        "RuSe2",
+        "RuIr",
+        "RuCo",
+        "RuNi",
+        "Ru/C",
+        "SrRuO3",
+        "Ru single atom",
+        "Ru-SA",
+        "ruthenium oxide",
+        "ruthenium dioxide",
+        "ruthenium nanoparticle"
+      ],
+      "cmp_queries": [
+        "\"ruthenium\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"ruthenium\" \"chemical mechanical\" \"Tafel\"",
+        "\"ruthenium\" \"KIO4\" \"potentiodynamic\"",
+        "\"ruthenium\" \"periodate\" \"polarization\" \"slurry\"",
+        "\"ruthenium\" \"NaClO\" \"potentiodynamic\"",
+        "\"ruthenium\" \"hypochlorite\" \"corrosion\" \"CMP\"",
+        "\"ruthenium\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"ruthenium\" \"persulfate\" \"polarization\"",
+        "\"ruthenium\" \"wet etching\" \"potentiodynamic\"",
+        "\"ruthenium\" \"galvanic corrosion\" \"copper\" \"CMP\""
+      ]
+    },
+    "Ti": {
+      "target_metal": "titanium",
+      "ecorr_valid_range_v_she": [
+        -1.2,
+        0.8
+      ],
+      "compounds": [
+        "TiO2",
+        "Ti2O3",
+        "TiO",
+        "TiN",
+        "TiC",
+        "TiB2",
+        "TiS2",
+        "TiSe2",
+        "Ti-6Al-4V",
+        "Ti-Ni",
+        "Ti-Cu",
+        "Ti-Ta",
+        "titanium dioxide",
+        "titanium oxide",
+        "titanium nitride",
+        "titanium carbide",
+        "titanium foil",
+        "titanium alloy",
+        "titanium implant",
+        "titanium substrate",
+        "anodized titanium",
+        "titanium nanotube"
+      ],
+      "cmp_queries": [
+        "\"titanium\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"titanium\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"titanium\" \"HF\" \"wet etching\" \"polarization\"",
+        "\"titanium\" \"slurry\" \"corrosion current\""
+      ]
+    },
+    "TiN": {
+      "target_metal": "titanium nitride",
+      "ecorr_valid_range_v_she": [
+        -0.8,
+        1.0
+      ],
+      "compounds": [
+        "TiN",
+        "Ti2N",
+        "TiN thin film",
+        "TiN coating",
+        "TiN nanoparticle",
+        "TiN nanotube",
+        "TiN electrode",
+        "TiN substrate",
+        "TiAlN",
+        "TiCN",
+        "TiSiN",
+        "TiN/Si",
+        "TiN/Ti",
+        "TiN/Cu",
+        "titanium nitride film",
+        "titanium nitride coating",
+        "titanium nitride electrode",
+        "reactive sputtering TiN",
+        "PVD TiN",
+        "CVD TiN",
+        "ALD TiN"
+      ],
+      "cmp_queries": [
+        "\"titanium nitride\" \"CMP\" \"potentiodynamic\"",
+        "\"TiN\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"titanium nitride\" \"wet etching\" \"H2O2\"",
+        "\"TiN\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"TiN\" \"SC-1\" \"polarization\" etching",
+        "\"TiN\" \"NH4OH\" \"H2O2\" \"corrosion\"",
+        "\"titanium nitride\" \"oxidizer\" \"Tafel\"",
+        "\"TiN\" \"slurry\" \"corrosion current\" \"Ecorr\""
+      ]
+    },
+    "TaN": {
+      "target_metal": "tantalum nitride",
+      "ecorr_valid_range_v_she": [
+        -0.8,
+        1.0
+      ],
+      "compounds": [
+        "TaN",
+        "Ta3N5",
+        "Ta2N",
+        "TaN thin film",
+        "TaN coating",
+        "TaN electrode",
+        "TaN barrier",
+        "TaN nanoparticle",
+        "TaN/Si",
+        "TaN/Cu",
+        "TaN/Ti",
+        "tantalum nitride film",
+        "tantalum nitride coating",
+        "tantalum nitride electrode",
+        "tantalum nitride barrier",
+        "reactive sputtering TaN",
+        "PVD TaN",
+        "CVD TaN",
+        "ALD TaN",
+        "TaTiN",
+        "TaSiN",
+        "TaAlN"
+      ],
+      "cmp_queries": [
+        "\"tantalum nitride\" \"CMP\" \"potentiodynamic\"",
+        "\"TaN\" \"barrier\" \"CMP\" \"potentiodynamic\"",
+        "\"TaN\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"TaN\" \"slurry\" \"Tafel\" corrosion",
+        "\"TaN\" \"galvanic corrosion\" \"copper\" \"CMP\""
+      ]
+    },
+    "Al": {
+      "target_metal": "aluminum",
+      "ecorr_valid_range_v_she": [
+        -1.8,
+        0.2
+      ],
+      "compounds": [
+        "Al2O3",
+        "AlOOH",
+        "Al(OH)3",
+        "AlN",
+        "AlP",
+        "Al-Cu",
+        "Al-Mg",
+        "Al-Zn",
+        "Al-Si",
+        "Al-Ti",
+        "AA2024",
+        "AA7075",
+        "AA6061",
+        "AA5052",
+        "aluminum alloy",
+        "aluminium alloy",
+        "aluminum oxide",
+        "aluminium oxide",
+        "aluminum foil",
+        "aluminium foil",
+        "anodized aluminum",
+        "anodized aluminium",
+        "aluminum coating",
+        "aluminium coating"
+      ],
+      "cmp_queries": [
+        "\"aluminum\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"aluminum\" \"wet etching\" \"potentiodynamic\"",
+        "\"aluminum\" \"H2O2\" \"slurry\" \"Tafel\""
+      ]
+    },
+    "Ta": {
+      "target_metal": "tantalum",
+      "ecorr_valid_range_v_she": [
+        -1.2,
+        0.8
+      ],
+      "compounds": [
+        "Ta2O5",
+        "TaO2",
+        "TaON",
+        "TaN",
+        "Ta3N5",
+        "Ta2N",
+        "TaC",
+        "TaB2",
+        "TaS2",
+        "TaSe2",
+        "Ta-Ti",
+        "Ta-W",
+        "Ta-Cu",
+        "tantalum oxide",
+        "tantalum pentoxide",
+        "tantalum nitride",
+        "tantalum carbide",
+        "tantalum foil",
+        "tantalum thin film",
+        "tantalum electrode",
+        "tantalum capacitor",
+        "anodized tantalum"
+      ],
+      "cmp_queries": [
+        "\"tantalum\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"tantalum\" \"H2O2\" \"slurry\" \"Tafel\"",
+        "\"tantalum\" \"barrier\" \"galvanic corrosion\" \"CMP\""
+      ]
+    },
+    "Mn": {
+      "target_metal": "manganese",
+      "ecorr_valid_range_v_she": [
+        -1.5,
+        0.6
+      ],
+      "compounds": [
+        "MnO2",
+        "Mn2O3",
+        "Mn3O4",
+        "MnO",
+        "MnOOH",
+        "MnS",
+        "MnSe",
+        "MnP",
+        "MnFe2O4",
+        "MnCo2O4",
+        "MnNiO",
+        "NiMn",
+        "CoMn",
+        "FeMn",
+        "manganese oxide",
+        "manganese dioxide",
+        "manganese phosphide",
+        "manganese sulfide",
+        "MnO2 nanosheet",
+        "MnO2 nanowire",
+        "birnessite",
+        "spinel manganese",
+        "manganese steel"
+      ],
+      "cmp_queries": [
+        "\"manganese\" \"CMP\" \"potentiodynamic\"",
+        "\"manganese\" \"H2O2\" \"potentiodynamic polarization\""
+      ]
+    },
+    "Mo": {
+      "target_metal": "molybdenum",
+      "ecorr_valid_range_v_she": [
+        -1.0,
+        0.8
+      ],
+      "compounds": [
+        "MoS2",
+        "MoSe2",
+        "MoTe2",
+        "MoO2",
+        "MoO3",
+        "Mo2C",
+        "MoC",
+        "MoN",
+        "MoP",
+        "Mo2N",
+        "NiMo",
+        "CoMo",
+        "FeMo",
+        "1T-MoS2",
+        "2H-MoS2",
+        "molybdenum disulfide",
+        "molybdenum carbide",
+        "molybdenum phosphide",
+        "molybdenum oxide",
+        "molybdenum nitride",
+        "MoS2 nanosheet",
+        "MoS2 edge"
+      ],
+      "cmp_queries": [
+        "\"molybdenum\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"molybdenum\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"molybdenum\" \"wet etching\" \"Tafel\"",
+        "\"molybdenum\" \"slurry\" \"corrosion current\""
+      ]
+    }
+  }
+}
