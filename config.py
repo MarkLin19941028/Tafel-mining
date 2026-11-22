@@ -7,6 +7,28 @@
 
 import os
 import re as _re
+from pathlib import Path as _Path
+
+
+def _load_dotenv(env_path: _Path) -> None:
+    """從專案根目錄的 .env 載入環境變數（不覆蓋已設定的系統環境變數）。"""
+    if not env_path.is_file():
+        return
+    with env_path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key:
+                os.environ.setdefault(key, value)
+
+
+_load_dotenv(_Path(__file__).resolve().parent / ".env")
 
 # ============================================================
 #  1. 基本設定
@@ -15,8 +37,8 @@ import re as _re
 # ✏️ 你的 email（OpenAlex / Unpaywall 用）
 MAILTO = "cy90207@gmail.com"
 
-# ✏️ OpenAlex API Key（可貼在引號內，或設為環境變數 OPENALEX_API_KEY）
-OPENALEX_API_KEY = os.environ.get("OPENALEX_API_KEY") or "IvtlLFfENlf2upJBwE3p6b"
+# ✏️ OpenAlex API Key（請設於 .env 或環境變數 OPENALEX_API_KEY）
+OPENALEX_API_KEY = os.environ.get("OPENALEX_API_KEY", "")
 
 # ✏️ 斷點續跑開關：True = 若輸出檔已存在則自動略過（可用 run_all.py --force 強制重跑）
 SKIP_EXISTING_STEP1 = True
@@ -41,9 +63,9 @@ FROM_YEAR = 2010
 #    "all"           = 腐蝕 + CMP/濕蝕刻 + 電催化
 SEARCH_MODE = "corrosion_cmp"
 
-# ✏️ Semantic Scholar API 設定（API Key 留空即可運作，未來申請後填入可提升速率與額度）
+# ✏️ Semantic Scholar API 設定（請設於 .env 或環境變數 SEMANTIC_SCHOLAR_API_KEY；留空亦可運作）
 ENABLE_SEMANTIC_SCHOLAR = True
-SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY") or "s2k-i24Pfl67Awi8AuKlhP8dOZdt4OR6JAGd8OfE0HD0"
+SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 SEMANTIC_SCHOLAR_USE_BULK = True          # True = 將 60+ 條查詢濃縮為 3 組高容量布林查詢並走 /paper/search/bulk（減少 95% 請求與 429）
 SEMANTIC_SCHOLAR_MAX_PER_QUERY = 200      # 每組 bulk 查詢最多保留幾篇具 DOI 論文（/search/bulk 單次最多可回傳 1000 篇）
 SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY = 15  # 未展開布林合併且無 Key 時的查詢組數上限
@@ -54,9 +76,9 @@ ENABLE_EUROPEPMC_XML = True
 EUROPEPMC_MAX_PAPERS = 100    # 每個金屬主動從 Europe PMC 抓取的開放腐蝕論文上限
 EUROPEPMC_DELAY = 0.5         # Europe PMC API 請求間隔秒數
 
-# ✏️ Materials Project API 設定（Step 7 物理與 Pourbaix 熱力學特徵強化用）
+# ✏️ Materials Project API 設定（Step 7 物理與 Pourbaix 熱力學特徵強化用；請設於 .env 或環境變數 MP_API_KEY）
 ENABLE_MP_API = True
-MP_API_KEY = os.environ.get("MP_API_KEY") or "DLDLp68YWoFsQFtTglm3jsQk6yZCJKL7"
+MP_API_KEY = os.environ.get("MP_API_KEY", "")
 
 # ============================================================
 #  2. 多金屬預設表與批次執行清單（✏️ 改這裡就能增減金屬）
