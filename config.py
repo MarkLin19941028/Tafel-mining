@@ -46,7 +46,7 @@ SKIP_EXISTING_STEP1 = True
 SKIP_EXISTING_STEP2 = True
 
 # ✏️ 每組關鍵字最多抓幾篇（測試用 50，正式用 300）
-MAX_RECORDS_PER_QUERY = 200
+MAX_RECORDS_PER_QUERY = 300
 
 # ✏️ PDF 下載時每筆間隔秒數（避免被封鎖）
 DOWNLOAD_DELAY = 2
@@ -68,13 +68,13 @@ SEARCH_MODE = "corrosion_cmp"
 ENABLE_SEMANTIC_SCHOLAR = True
 SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 SEMANTIC_SCHOLAR_USE_BULK = True          # True = 將 60+ 條查詢濃縮為 3 組高容量布林查詢並走 /paper/search/bulk（減少 95% 請求與 429）
-SEMANTIC_SCHOLAR_MAX_PER_QUERY = 200      # 每組 bulk 查詢最多保留幾篇具 DOI 論文（/search/bulk 單次最多可回傳 1000 篇）
+SEMANTIC_SCHOLAR_MAX_PER_QUERY = 500      # 每組 bulk 查詢最多保留幾篇具 DOI 論文（/search/bulk 單次最多可回傳 1000 篇）
 SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY = 15  # 未展開布林合併且無 Key 時的查詢組數上限
 SEMANTIC_SCHOLAR_DELAY = 3.0              # 每次 HTTP 請求間的最小保證間隔秒數（遇 429 會自動 AIMD 動態拉長）
 
 # ✏️ Europe PMC 開放全文 XML 設定（免 API Key、無 403 封鎖，且可直接取得結構化表格）
 ENABLE_EUROPEPMC_XML = True
-EUROPEPMC_MAX_PAPERS = 200    # 每個金屬主動從 Europe PMC 抓取的開放腐蝕論文上限
+EUROPEPMC_MAX_PAPERS = 500    # 每個金屬主動從 Europe PMC 抓取的開放腐蝕論文上限
 EUROPEPMC_DELAY = 0.5         # Europe PMC API 請求間隔秒數
 
 # ✏️ Materials Project API 設定（Step 7 物理與 Pourbaix 熱力學特徵強化用；請設於 .env 或環境變數 MP_API_KEY）
