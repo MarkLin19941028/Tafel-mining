@@ -15,6 +15,7 @@ from config import (
     TAFEL_MIN,
 )
 from step5_constants import (
+    convert_log_icorr_to_uA_cm2,
     convert_to_she,
     normalize_ecorr_to_v,
     normalize_icorr_to_uA_cm2,
@@ -36,6 +37,7 @@ from step5_text_extractor import (
 _COL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("sample", re.compile(r"\b(?:specimen|sample|electrode|alloy|material|coating|inhibitor|catalyst|system|condition|substrate)\b", re.I)),
     ("Ecorr", re.compile(r"(?:e\s*_?\s*corr|corrosion\s+potential|\bocp\b)", re.I)),
+    ("log_icorr", re.compile(r"\b(?:log|lg)\s*\(?\s*[ij]\s*_?\s*corr", re.I)),
     ("icorr", re.compile(r"(?:[ij]\s*_?\s*corr|corrosion\s+current)", re.I)),
     ("beta_a", re.compile(r"(?:β\s*_?\s*a|\bb\s*_?\s*a\b|anodic\s+(?:tafel|slope))", re.I)),
     ("beta_c", re.compile(r"(?:β\s*_?\s*c|\bb\s*_?\s*c\b|cathodic\s+(?:tafel|slope))", re.I)),
@@ -44,16 +46,57 @@ _COL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("CR", re.compile(r"(?:corrosion\s+rate|\bcr\b|\bv\s*corr\b)", re.I)),
 ]
 
-_ECHEM_COL_ROLES = {"Ecorr", "icorr", "beta_a", "beta_c", "tafel", "Rp", "CR"}
+_ECHEM_COL_ROLES = {"Ecorr", "log_icorr", "icorr", "beta_a", "beta_c", "tafel", "Rp", "CR"}
 _UNIT_IN_PARENS_RE = re.compile(r"[\(\[]([^\)\]]+)[\)\]]")
+_TABLE_CAPTION_RE = re.compile(
+    r"(?:^|\n)\s*Table\s+(\d+)\s*[\.:\-–—]?\s*([^\n]{5,240}(?:\n[^\n]{1,160})?)",
+    re.I,
+)
+_TABLE_FOOTNOTE_RE = re.compile(
+    r"(?:^|\n)\s*(?:Note\s*:|Notes\s*:|\*+\s*|[a-c]\s+(?=[A-Z0-9])|[†‡]\s*)([^\n]{5,200})",
+    re.I,
+)
+
+
+def extract_table_captions(body_text: str) -> dict[int, str]:
+    """從內文擷取 Table N 的標題與鄰近註腳說明，回傳 {table_idx_0based: caption_and_notes}。"""
+    captions: dict[int, str] = {}
+    if not body_text:
+        return captions
+    matches = list(_TABLE_CAPTION_RE.finditer(body_text))
+    for i, m in enumerate(matches):
+        try:
+            t_num = int(m.group(1))
+        except ValueError:
+            continue
+        idx = t_num - 1
+        if idx < 0 or idx in captions:
+            continue
+        cap = re.sub(r"\s+", " ", m.group(2)).strip()
+        # 往後搜尋至下一個 Table 標題前（最多 1500 字元）擷取可能的表格註腳
+        search_end = min(len(body_text), m.end() + 1500)
+        if i + 1 < len(matches):
+            search_end = min(search_end, matches[i + 1].start())
+        window = body_text[m.end():search_end]
+        footnotes = [
+            re.sub(r"\s+", " ", fm.group(1)).strip()
+            for fm in _TABLE_FOOTNOTE_RE.finditer(window)
+        ][:3]
+        captions[idx] = " | ".join([cap] + footnotes) if footnotes else cap
+    return captions
 
 
 def _classify_table_header(cell: str) -> tuple[str | None, str]:
     c = normalize_text(str(cell or "")).replace("\n", " ").strip()
     if not c:
         return None, ""
-    unit_m = _UNIT_IN_PARENS_RE.search(c)
-    unit = unit_m.group(1).strip() if unit_m else ""
+    parens = [m.group(1).strip() for m in _UNIT_IN_PARENS_RE.finditer(c) if m.group(1).strip()]
+    # 若表頭有多組括號（如 "log(icorr) (A/cm2)"），略過指標名稱本身，優先取最後一組單位括號
+    unit = ""
+    for p in reversed(parens):
+        if not re.fullmatch(r"[ij]\s*_?\s*corr|e\s*_?\s*corr", p, re.I):
+            unit = p
+            break
     for role, pat in _COL_PATTERNS:
         if pat.search(c):
             return role, unit
@@ -115,10 +158,22 @@ def parse_structured_table(
     paper_temp_counts = paper_env.get("temp_counts", Counter())
     ref_counts = paper_env.get("ref_counts", Counter())
     refs = paper_env.get("refs", [])
-    primary_ref = select_ref_electrode([], ref_counts) or (refs[0] if refs else None)
+    table_captions = paper_env.get("table_captions") or {}
+    table_caption = table_captions.get(table_idx, "")
+    if not table_caption and len(table_captions) == 1:
+        # 若整篇論文只有單一編號表格（例如跨頁拆表或無編號附表），沿用該唯一表題
+        table_caption = next(iter(table_captions.values()))
+    header_text = " | ".join(normalize_text(str(c or "")) for c in table[header_row_idx])
+    table_ref = select_ref_electrode([header_text, table_caption], ref_counts)
+    primary_ref = table_ref or (refs[0] if refs else None)
+    ordered_refs = (
+        [primary_ref] + [r for r in refs if r != primary_ref]
+        if primary_ref
+        else list(refs)
+    )
     paper_reactions = paper_env.get("reactions", [])
     if "corrosion" not in paper_reactions and any(
-        r in {"Ecorr", "icorr", "Rp", "CR"} for r, _ in col_map.values()
+        r in {"Ecorr", "log_icorr", "icorr", "Rp", "CR"} for r, _ in col_map.values()
     ):
         paper_reactions = list(paper_reactions) + ["corrosion"]
 
@@ -161,12 +216,23 @@ def parse_structured_table(
                         v, primary_ref,
                         paper_ph_counts.most_common(1)[0][0] if paper_ph_counts else None,
                     )
-            elif role == "icorr":
-                icorr_uA = normalize_icorr_to_uA_cm2(val, unit or "uA/cm2")
-                icorr_raw = cell_str
-                icorr_unit = unit or "uA/cm2"
-                if icorr_uA is not None and icorr_uA > 0:
+            elif role == "log_icorr":
+                converted = convert_log_icorr_to_uA_cm2(val, unit)
+                if converted is not None:
+                    icorr_uA = converted
+                    icorr_raw = cell_str
+                    icorr_unit = f"log({unit or 'A/cm2'})"
                     log_icorr = np.log10(icorr_uA * 1e-6)
+                    rec_notes.append("icorr converted from log(icorr)")
+            elif role == "icorr":
+                converted = normalize_icorr_to_uA_cm2(val, unit or "uA/cm2")
+                if converted is not None:
+                    icorr_uA = converted
+                    icorr_raw = cell_str
+                    icorr_unit = unit or "uA/cm2"
+                    log_icorr = np.log10(icorr_uA * 1e-6)
+                else:
+                    rec_notes.append(f"rejected non-positive icorr={cell_str}")
             elif role == "beta_a":
                 v = abs(val)
                 if unit and "v" in unit.lower() and "mv" not in unit.lower():
@@ -203,11 +269,14 @@ def parse_structured_table(
         if not any(x is not None for x in (ecorr_v_orig, icorr_uA, beta_a, beta_c, tafel_gen, cr_val, rp_val)):
             continue
 
-        ctxs = [sample_name or "", row_text]
-        mat_id, mat_method = assign_material(ctxs, paper_counts or Counter())
+        ctxs = [sample_name or "", row_text, table_caption]
+        mat_id, mat_method = assign_material([sample_name or "", row_text], paper_counts or Counter())
         rec_els, rec_ph, rec_temp = select_environment_for_record(
             ctxs, paper_els, paper_ph_counts, paper_temp_counts
         )
+        # 若環境已解析出該列/該表專屬 pH 且參考電極為 RHE，重新換算 Ecorr_V_SHE
+        if ecorr_v_orig is not None and primary_ref:
+            ecorr_v_she = convert_to_she(ecorr_v_orig, primary_ref, rec_ph)
         sol_id = generate_solution_id(rec_els, rec_ph, rec_temp) if (rec_els or rec_ph is not None) else None
 
         rec = {
@@ -230,7 +299,7 @@ def parse_structured_table(
             "record_temp": rec_temp,
             "temperature_C_values": str(rec_temp) if rec_temp is not None else None,
             "solution_id_assigned": sol_id,
-            "reference_electrodes": "; ".join(refs) if refs else None,
+            "reference_electrodes": "; ".join(ordered_refs) if ordered_refs else None,
             "deaerated": paper_env.get("deaerated", False),
             "aerated": paper_env.get("aerated", False),
             "o2_saturated": paper_env.get("o2_saturated", False),

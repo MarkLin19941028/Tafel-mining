@@ -2,6 +2,9 @@
 Step 5 — Output table builders (material, solution, electrochemical) and quality/outlier helpers.
 """
 
+import json
+import re
+
 import pandas as pd
 
 from config import (
@@ -13,6 +16,8 @@ from config import (
 )
 from step5_constants import (
     KNOWN_MATERIALS,
+    PURE_MATERIAL_CLASSES,
+    TABLE_EXTRACTION_METHODS,
     calc_corrosion_rate,
 )
 from step5_text_extractor import (
@@ -21,6 +26,75 @@ from step5_text_extractor import (
     generate_solution_id,
     lookup_species_category,
 )
+
+# ====================================================================
+# Material class & record eligibility helpers
+# ====================================================================
+
+_METAL_ELEMENTS = {
+    "Ag", "Al", "Au", "Bi", "Cd", "Co", "Cr", "Cu", "Fe", "Ga", "Ge",
+    "Hf", "In", "Ir", "Mg", "Mn", "Mo", "Nb", "Ni", "Os", "Pb", "Pd",
+    "Pt", "Re", "Rh", "Ru", "Sb", "Sc", "Sn", "Ta", "Ti", "V", "W",
+    "Y", "Zn", "Zr",
+}
+_METAL_SYM_PAT = "|".join(sorted(_METAL_ELEMENTS, key=len, reverse=True))
+_MULTI_METAL_SEP_RE = re.compile(
+    rf"(?<![A-Za-z])(?P<m1>{_METAL_SYM_PAT})\d*(?:\.\d+)?\s*[-/–]\s*(?:\d*(?:\.\d+)?)?(?P<m2>{_METAL_SYM_PAT})(?![a-z])"
+)
+_MULTI_METAL_CONCAT_RE = re.compile(
+    rf"(?<![A-Za-z])(?P<m1>{_METAL_SYM_PAT})\d*(?P<m2>{_METAL_SYM_PAT})\d*(?:(?P<m3>{_METAL_SYM_PAT})\d*)?(?![a-z])"
+)
+_COATING_COMPOSITE_RE = re.compile(
+    r"(?:@|\b(?:coating|coated|composite|nanocomposite|hybrid|substrate|doped|"
+    r"graphene|rgo|go\b|cnt|mwcnt|mxene|epoxy|polymer|silane|mof|ldh|chitosan|"
+    r"polyaniline|pani|ppy|pvd|cvd)\b|\b(?:film|layer)\s+on\b|"
+    r"\bon\s+(?:cu|fe|al|ti|mg|zn|ni|co|steel|brass|si|glass|ito|fto)\b)",
+    re.I,
+)
+_ALLOY_KEYWORD_RE = re.compile(
+    r"\b(?:alloy|alloys|brass|bronze|stainless|inconel|monel|hastelloy|zircaloy|"
+    r"steel|ss\s*3\d{2}|3(?:04|16)l?|aa\s*\d{4}|az\d{2}|ti[- ]?6al[- ]?4v|hea|hea\d*)\b",
+    re.I,
+)
+
+
+def classify_material_class(material_id: str | None, sample_name: str | None) -> str:
+    """
+    依樣品名與材料 ID 分類：
+      - 'coating_composite': 塗層、複合材料、基材覆膜、核殼 (@) 等
+      - 'alloy': 合金、鋼材、多金屬組合（如 Zn-Co、Ti-6Al-4V、CoCrMo）
+      - 'compound': 單一目標化合物（如 TiN、TaN、Cu2O）
+      - 'pure': 純金屬或條件型樣品名（如 Blank、0 mM BTA、pH 4）
+    """
+    sname = str(sample_name or "").strip()
+    if sname:
+        if _COATING_COMPOSITE_RE.search(sname):
+            return "coating_composite"
+        if _ALLOY_KEYWORD_RE.search(sname):
+            return "alloy"
+        for m in _MULTI_METAL_SEP_RE.finditer(sname):
+            if m.group("m1") != m.group("m2"):
+                return "alloy"
+        for m in _MULTI_METAL_CONCAT_RE.finditer(sname):
+            metals = {g for g in (m.group("m1"), m.group("m2"), m.group("m3")) if g}
+            if len(metals) >= 2:
+                return "alloy"
+
+    mid = str(material_id or "").strip()
+    elems = re.findall(r"[A-Z][a-z]?", mid)
+    if len(elems) >= 2:
+        return "compound"
+    return "pure"
+
+
+def is_eligible_echem_record(rec: dict) -> bool:
+    """僅保留腐蝕類（corrosion）且至少具備 Ecorr 或 icorr 之一的記錄。"""
+    if _classify_reaction_type(rec) != "corrosion":
+        return False
+    return (
+        rec.get("Ecorr_V_original") is not None
+        or rec.get("icorr_uA_cm2") is not None
+    )
 
 # 11. BUILD THREE OUTPUT TABLES
 
@@ -33,6 +107,8 @@ def build_material_properties(raw_records: list[dict]) -> pd.DataFrame:
     detected_materials = set()
 
     for rec in raw_records:
+        if KEEP_ONLY_TARGET_METAL and not rec.get("is_target_metal", False):
+            continue
         # 只列入「實際被指派到電化學數據」的材料（目標金屬另外保證存在）
         mid = rec.get("material_id_assigned")
         if mid in KNOWN_MATERIALS:
@@ -152,6 +228,18 @@ def build_solution_properties(raw_records: list[dict]) -> pd.DataFrame:
                 "ionic_strength_mol_L": None,
                 "ORP_mV": None,
                 "deaerated": rec.get("deaerated", False),
+                "components_json": json.dumps(
+                    [
+                        {
+                            "species": c.get("species"),
+                            "conc": c.get("conc"),
+                            "unit": c.get("unit"),
+                            "role": (lookup_species_category(c.get("species", "")) or {}).get("role"),
+                        }
+                        for c in components
+                    ],
+                    ensure_ascii=False,
+                ),
                 "source": "",
                 "notes": "",
             }
@@ -247,6 +335,9 @@ def build_electrochemical_database(
  
 
     for rec in raw_records:
+
+        if not is_eligible_echem_record(rec):
+            continue
 
         record_counter += 1
 
@@ -351,6 +442,7 @@ def build_electrochemical_database(
             "solution_id": solution_id,
 
             "metal": material_id,
+            "material_class": classify_material_class(material_id, rec.get("sample_name")),
             "is_target_metal": material_id == METAL_SYMBOL,
             "material_assignment_method": rec.get("material_assignment_method"),
             "paper_primary_material": rec.get("paper_primary_material"),
@@ -365,7 +457,7 @@ def build_electrochemical_database(
 
             "pH": ph,
 
-            "temperature_C": temp if temp is not None else 25,
+            "temperature_C": temp,
 
             "reference_electrode": ref_elec,
 
@@ -471,7 +563,7 @@ def _estimate_quality(rec: dict) -> float:
 
         score += 0.05
 
-    if rec.get("extraction_method") == "table_regex":
+    if rec.get("extraction_method") in TABLE_EXTRACTION_METHODS:
 
         score += 0.1
 
@@ -483,8 +575,13 @@ def check_outlier_reason(row: dict) -> str | None:
     """檢查單筆電化學記錄是否超出物理合理區間，回傳原因字串或 None。"""
     reasons = []
     mat = row.get("material_id") or "default"
+    mat_class = row.get("material_class") or "pure"
     ecorr_she = row.get("Ecorr_V_SHE")
-    if ecorr_she is not None and not pd.isna(ecorr_she):
+    if (
+        mat_class in PURE_MATERIAL_CLASSES
+        and ecorr_she is not None
+        and not pd.isna(ecorr_she)
+    ):
         lo, hi = ECORR_VALID_RANGE_V_SHE.get(mat, ECORR_VALID_RANGE_V_SHE["default"])
         if not (lo <= float(ecorr_she) <= hi):
             reasons.append(f"Ecorr_V_SHE={ecorr_she} out of [{lo}, {hi}] V for {mat}")
@@ -531,7 +628,7 @@ def _quality_notes(rec: dict) -> str:
 
     notes = []
 
-    if rec.get("extraction_method") == "table_regex":
+    if rec.get("extraction_method") in TABLE_EXTRACTION_METHODS:
 
         notes.append("extracted from table")
 

@@ -27,6 +27,10 @@ KNOWN_MATERIALS: dict[str, dict] = build_known_materials()
 
  
 
+NERNST_SLOPE: float = 0.05916  # 2.303 RT / F at 298.15 K (V/pH)
+PURE_MATERIAL_CLASSES: tuple[str, ...] = ("pure", "compound")
+TABLE_EXTRACTION_METHODS: tuple[str, ...] = ("table_regex", "table_column_mapped")
+
 REF_ELECTRODE_TO_SHE: dict[str, float] = {
 
     "SHE": 0.0,
@@ -87,7 +91,7 @@ def convert_to_she(value_v: float, ref_electrode: str,
 
         if ph is not None:
 
-            return value_v - 0.059 * ph
+            return value_v - NERNST_SLOPE * ph
 
         return None
 
@@ -101,9 +105,9 @@ def convert_to_she(value_v: float, ref_electrode: str,
 
                 return value_v + offset
 
-            if "rhe" in ref_lower and ph is not None:
+            if ("rhe" in ref_lower or "reversible hydrogen" in ref_lower) and ph is not None:
 
-                return value_v - 0.059 * ph
+                return value_v - NERNST_SLOPE * ph
 
             return None
 
@@ -159,11 +163,28 @@ def parse_scientific(raw: str) -> float | None:
     return None
 
 
+_UNIT_SCALE_RE = re.compile(r"(?:[×xX*·⋅]\s*)?10\s*\^?\s*([+\-]?\s*\d+)")
+_PURE_AMP_RE = re.compile(r"(?:^|[^a-z])a(?:/|cm|mm|m|$)")
+
+
 def normalize_icorr_to_uA_cm2(value: float, unit: str) -> float | None:
-    if value is None:
+    if value is None or value <= 0:
         return None
     u = normalize_text(unit or "").lower()
-    u = re.sub(r"[\s·⋅]", "", u).replace("−", "-").replace("–", "-")
+    u = u.replace("−", "-").replace("–", "-").replace("—", "-")
+
+    # 解析表頭科學記號倍率（例如 "×10-6 A/cm2"、"10^-5 mA cm-2"）
+    scale_factor = 1.0
+    scale_m = _UNIT_SCALE_RE.search(u)
+    if scale_m:
+        exp_str = re.sub(r"\s+", "", scale_m.group(1))
+        try:
+            scale_factor = 10.0 ** float(exp_str)
+        except (ValueError, OverflowError):
+            return None
+        u = u[:scale_m.start()] + " " + u[scale_m.end():]
+
+    u = re.sub(r"[\s·⋅]", "", u)
 
     # 面積換算：目標為 cm^2
     area_factor = 1.0
@@ -180,12 +201,21 @@ def normalize_icorr_to_uA_cm2(value: float, unit: str) -> float | None:
         curr_factor = 1.0
     elif "ma" in u:
         curr_factor = 1000.0
-    elif "a" in u:
+    elif _PURE_AMP_RE.search(u):
         curr_factor = 1e6
     else:
         curr_factor = 1.0
 
-    return value * curr_factor * area_factor
+    return value * scale_factor * curr_factor * area_factor
+
+
+def convert_log_icorr_to_uA_cm2(log_value: float, unit: str = "") -> float | None:
+    """將 log10(icorr) 還原為 µA/cm²。未標單位且數值 < -1 時預設原單位為 A/cm²。"""
+    if log_value is None or not (-20.0 <= log_value <= 10.0):
+        return None
+    raw_val = 10.0 ** float(log_value)
+    effective_unit = unit.strip() if unit and unit.strip() else ("A/cm2" if log_value < -1.0 else "uA/cm2")
+    return normalize_icorr_to_uA_cm2(raw_val, effective_unit)
 
 
 def normalize_ecorr_to_v(value: float, unit: str) -> tuple[float | None, str | None]:

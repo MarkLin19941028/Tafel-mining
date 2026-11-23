@@ -50,9 +50,14 @@ except ImportError:
     MP_CACHE_PATH = os.path.join(SIMULATOR_DATA_DIR, "mp_cache.json")
     REQUEST_TIMEOUT = 30
 
+from step5_constants import (
+    NERNST_SLOPE,
+    PURE_MATERIAL_CLASSES,
+    convert_to_she,
+)
+
 MP_REST_BASE = "https://api.materialsproject.org"
 DG_H2O_EV = -2.4583  # ΔGf°(H2O, l) in eV at 298.15 K
-NERNST_SLOPE = 0.05916  # 2.303 RT / F at 298.15 K (V/pH)
 
 # ============================================================
 #  1. 內建元素與電化學熱力學常數表（CRC Handbook / Michaelson / Pourbaix Atlas）
@@ -586,7 +591,11 @@ def build_galvanic_risk_preview(df: pd.DataFrame) -> pd.DataFrame:
 #  6. 主執行流程
 # ============================================================
 
-def run_enrich(refresh_cache: bool = False, offline: bool = False) -> pd.DataFrame:
+def run_enrich(
+    refresh_cache: bool = False,
+    offline: bool = False,
+    include_alloys: bool = False,
+) -> pd.DataFrame:
     merged_dir = Path(SIMULATOR_DATA_DIR)
     echem_path = merged_dir / "electrochemical_database.csv"
     sol_path = merged_dir / "solution_properties.csv"
@@ -602,6 +611,14 @@ def run_enrich(refresh_cache: bool = False, offline: bool = False) -> pd.DataFra
     print(f"[Step 7] 載入合併資料：Echem={len(echem_df)}, Solutions={len(sol_df)}, Materials={len(mat_df)}")
 
     df = echem_df.copy()
+
+    # 預設只針對純金屬與目標化合物做純元素 DFT/Pourbaix 強化與電偶模擬
+    if not include_alloys and "material_class" in df.columns:
+        before = len(df)
+        df = df[df["material_class"].isin(PURE_MATERIAL_CLASSES)].reset_index(drop=True)
+        excluded = before - len(df)
+        if excluded > 0:
+            print(f"[Step 7] 排除 {excluded} 筆 alloy/coating_composite 記錄（保留 {len(df)} 筆 pure/compound）")
 
     # 1. 左連接 solution_properties（避免覆蓋 echem 原有欄位）
     if not sol_df.empty and "solution_id" in df.columns and "solution_id" in sol_df.columns:
@@ -635,6 +652,30 @@ def run_enrich(refresh_cache: bool = False, offline: bool = False) -> pd.DataFra
     ph_pairs = df.apply(infer_effective_ph, axis=1)
     df["pH_effective"] = [p[0] for p in ph_pairs]
     df["pH_source"] = [p[1] for p in ph_pairs]
+
+    # 若為 RHE 且 Step 5 缺實測 pH 導致無法換算，利用 Step 7 推算的 pH_effective 補算 Ecorr_V_SHE
+    if {"Ecorr_V_SHE", "Ecorr_V_original", "reference_electrode"}.issubset(df.columns):
+        ref_low = df["reference_electrode"].fillna("").astype(str).str.lower()
+        rhe_mask = (
+            df["Ecorr_V_SHE"].isna()
+            & df["Ecorr_V_original"].notna()
+            & df["pH_effective"].notna()
+            & (ref_low.str.contains("rhe") | ref_low.str.contains("reversible hydrogen"))
+        )
+        if rhe_mask.any():
+            converted = [
+                convert_to_she(float(r["Ecorr_V_original"]), str(r["reference_electrode"]), float(r["pH_effective"]))
+                for _, r in df.loc[rhe_mask].iterrows()
+            ]
+            df.loc[rhe_mask, "Ecorr_V_SHE"] = [
+                round(v, 4) if v is not None else None for v in converted
+            ]
+            filled = sum(v is not None for v in converted)
+            print(f"[Step 7] 以 pH_effective 補算 {filled} 筆 RHE 記錄的 Ecorr_V_SHE")
+
+    # 下游 ML/模擬缺溫度時預設回退 25°C
+    if "temperature_C" in df.columns:
+        df["temperature_C"] = pd.to_numeric(df["temperature_C"], errors="coerce").fillna(25.0)
 
     # 4. 查詢 Materials Project API（使用快取避免重複請求）
     use_mp = ENABLE_MP_API and (not offline) and bool(MP_API_KEY)
@@ -775,8 +816,17 @@ def main():
         action="store_true",
         help="離線模式：不連線 Materials Project API，僅使用本地快取與內建熱力學表",
     )
+    parser.add_argument(
+        "--include-alloys",
+        action="store_true",
+        help="包含 alloy / coating_composite 記錄（預設只針對 pure / compound 做純元素特徵強化）",
+    )
     args = parser.parse_args()
-    run_enrich(refresh_cache=args.refresh_cache, offline=args.offline)
+    run_enrich(
+        refresh_cache=args.refresh_cache,
+        offline=args.offline,
+        include_alloys=args.include_alloys,
+    )
 
 
 if __name__ == "__main__":

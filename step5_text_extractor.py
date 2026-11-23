@@ -19,6 +19,7 @@ from config import (
 )
 from step5_constants import (
     KNOWN_MATERIALS,
+    convert_log_icorr_to_uA_cm2,
     convert_to_she,
     normalize_ecorr_to_v,
     normalize_icorr_to_uA_cm2,
@@ -824,30 +825,59 @@ def classify_solution_category(ph: float | None,
 
  
 
+def canonicalize_electrolyte(comp: dict) -> tuple[str, str, str]:
+    """將電解質濃度與單位正規化為標準形式（如 500 mM -> 0.5 M），用於 solution_id 去重。"""
+    raw_conc = str(comp.get("conc", "?")).strip()
+    raw_unit = normalize_text(str(comp.get("unit", ""))).strip()
+    species = str(comp.get("species", "?")).strip()
+
+    u_low = re.sub(r"\s+", " ", raw_unit).lower().replace("−", "-").replace("–", "-")
+    u_compact = u_low.replace(" ", "")
+
+    try:
+        val = float(raw_conc)
+    except ValueError:
+        return raw_conc, raw_unit, species
+
+    if u_compact in {"mm", "mmol/l", "mmoll-1", "mmoldm-3", "mmol/dm3"}:
+        val *= 1e-3
+        canon_unit = "M"
+    elif u_compact in {"um", "µm", "μm", "umol/l", "µmol/l", "μmol/l"}:
+        val *= 1e-6
+        canon_unit = "M"
+    elif u_compact in {"m", "mol/l", "moll-1", "moldm-3", "mol/dm3"}:
+        canon_unit = "M"
+    elif u_compact == "n":
+        canon_unit = "N"
+    elif u_compact in {"wt%", "wt.%", "w/w%", "mass%", "weight%"}:
+        canon_unit = "wt%"
+    elif u_compact in {"vol%", "vol.%", "v/v%"}:
+        canon_unit = "vol%"
+    elif u_compact in {"g/l", "gl-1", "gdm-3", "g/dm3"}:
+        canon_unit = "g/L"
+    elif u_compact in {"mg/l", "mgl-1", "ppm"}:
+        canon_unit = "mg/L"
+    else:
+        canon_unit = raw_unit
+
+    canon_conc = f"{val:.6g}"
+    return canon_conc, canon_unit, species
+
+
 def generate_solution_id(components: list[dict], ph: float | None,
-
                          temp: float | None) -> str:
-
-    parts = []
-
-    for comp in sorted(components, key=lambda c: c.get("species", "")):
-
-        parts.append(f"{comp.get('conc', '?')}{comp.get('unit', '')} "
-
-                     f"{comp.get('species', '?')}")
+    canon_comps = sorted({canonicalize_electrolyte(c) for c in components},
+                         key=lambda x: (x[2], x[1], x[0]))
+    parts = [f"{conc} {unit} {species}".strip() for conc, unit, species in canon_comps]
 
     if ph is not None:
-
-        parts.append(f"pH{ph}")
+        parts.append(f"pH{round(float(ph), 2):.6g}")
 
     if temp is not None:
-
-        parts.append(f"{temp}C")
+        parts.append(f"{round(float(temp), 2):.6g}C")
 
     fingerprint = "|".join(parts) if parts else "unknown"
-
     short_hash = hashlib.md5(fingerprint.encode()).hexdigest()[:8]
-
     return f"SOL_{short_hash}"
 
  
@@ -1108,6 +1138,9 @@ def extract_from_text(text: str, source_id: str,
 
             v = normalize_icorr_to_uA_cm2(raw_v, unit)
 
+            if v is None:
+                continue
+
             icorr_values.append({
 
                 "raw": m.group("value"),
@@ -1119,6 +1152,27 @@ def extract_from_text(text: str, source_id: str,
                 "context": get_context(text, m, 100),
                 "context_wide": get_context(text, m),
 
+            })
+
+    # 支援內文中的 log(icorr) / lg(icorr) 表達式（例如 log(icorr) = -5.2 A/cm2）
+    for m in re.finditer(
+        r"\b(?:log|lg)\s*\(?\s*[ij]\s*_?\s*corr\s*\)?\s*(?:=|of|is|was|:)\s*"
+        r"(?P<value>[\-−–]?\d+(?:\.\d+)?)\s*(?P<unit>(?:[µμunm]?A\s*(?:/|·|\s)\s*(?:cm|mm|m)\s*(?:\^?[-−]?2|²))?)",
+        text,
+        re.I,
+    ):
+        raw_v = parse_scientific(m.group("value"))
+        if raw_v is None:
+            continue
+        unit = (m.group("unit") or "").strip()
+        v = convert_log_icorr_to_uA_cm2(raw_v, unit)
+        if v is not None:
+            icorr_values.append({
+                "raw": m.group("value"),
+                "unit": f"log({unit or 'A/cm2'})",
+                "value_uA_cm2": v,
+                "context": get_context(text, m, 100),
+                "context_wide": get_context(text, m),
             })
 
  

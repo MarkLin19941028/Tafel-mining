@@ -46,7 +46,7 @@ SKIP_EXISTING_STEP1 = True
 SKIP_EXISTING_STEP2 = True
 
 # ✏️ 每組關鍵字最多抓幾篇（測試用 50，正式用 300）
-MAX_RECORDS_PER_QUERY = 50
+MAX_RECORDS_PER_QUERY = 200
 
 # ✏️ PDF 下載時每筆間隔秒數（避免被封鎖）
 DOWNLOAD_DELAY = 2
@@ -74,7 +74,7 @@ SEMANTIC_SCHOLAR_DELAY = 3.0              # 每次 HTTP 請求間的最小保證
 
 # ✏️ Europe PMC 開放全文 XML 設定（免 API Key、無 403 封鎖，且可直接取得結構化表格）
 ENABLE_EUROPEPMC_XML = True
-EUROPEPMC_MAX_PAPERS = 100    # 每個金屬主動從 Europe PMC 抓取的開放腐蝕論文上限
+EUROPEPMC_MAX_PAPERS = 200    # 每個金屬主動從 Europe PMC 抓取的開放腐蝕論文上限
 EUROPEPMC_DELAY = 0.5         # Europe PMC API 請求間隔秒數
 
 # ✏️ Materials Project API 設定（Step 7 物理與 Pourbaix 熱力學特徵強化用；請設於 .env 或環境變數 MP_API_KEY）

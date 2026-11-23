@@ -12,6 +12,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from config import (
+    KEEP_ONLY_TARGET_METAL,
     METAL_SYMBOL,
     STEP5_ECHEM_OUTPUT,
     STEP5_MATERIAL_OUTPUT,
@@ -54,6 +55,7 @@ from step5_text_extractor import (
 )
 from step5_table_extractor import (
     extract_from_tables,
+    extract_table_captions,
     parse_structured_table,
 )
 from step5_table_builders import (
@@ -62,6 +64,7 @@ from step5_table_builders import (
     build_solution_properties,
     check_outlier_reason,
     filter_echem_outliers,
+    is_eligible_echem_record,
 )
 
 # ====================================================================
@@ -103,18 +106,19 @@ def run_extract():
         paper_counts = count_materials(body_text)
         text_records = extract_from_text(norm_text, source_id, paper_counts=paper_counts)
 
-        all_raw_records.extend(text_records)
-
         table_path = os.path.join(TEXT_DIR, source_id + "_tables.json")
+        table_records = []
 
         if os.path.exists(table_path):
+            ref_counts = extract_ref_electrodes(body_text)
             paper_env = {
                 "electrolytes": extract_electrolytes(body_text),
                 "ph_counts": extract_phs(body_text),
                 "temp_counts": extract_temperatures(body_text),
-                "ref_counts": extract_ref_electrodes(body_text),
-                "refs": [r for r, _ in sorted(extract_ref_electrodes(body_text).items(), key=lambda kv: (-kv[1], kv[0]))],
+                "ref_counts": ref_counts,
+                "refs": [r for r, _ in sorted(ref_counts.items(), key=lambda kv: (-kv[1], kv[0]))],
                 "reactions": detect_reactions(norm_text),
+                "table_captions": extract_table_captions(body_text),
                 "metal_form": text_records[0].get("metal_form") if text_records else None,
                 "surface_preparation": text_records[0].get("surface_preparation") if text_records else None,
                 "measurement_methods": text_records[0].get("measurement_methods") if text_records else None,
@@ -127,7 +131,17 @@ def run_extract():
             table_records = extract_from_tables(
                 table_path, source_id, paper_counts=paper_counts, paper_env=paper_env
             )
+
+        # 論文級表格優先：若該論文已有至少 1 筆合格（且符合目標金屬篩選）電化學表格記錄，則捨棄內文 regex 記錄避免重複
+        has_valid_table = any(
+            is_eligible_echem_record(r)
+            and (not KEEP_ONLY_TARGET_METAL or r.get("is_target_metal", False))
+            for r in table_records
+        )
+        if has_valid_table:
             all_raw_records.extend(table_records)
+        else:
+            all_raw_records.extend(text_records)
 
     print(f"\nTotal raw records extracted: {len(all_raw_records)}")
 
@@ -196,11 +210,15 @@ def run_extract():
     outliers_df.to_csv(STEP5_OUTLIERS_OUTPUT, index=False, encoding="utf-8-sig")
     if len(outliers_df) > 0:
         print(f"  🧹 Filtered {len(outliers_df)} outlier records → {STEP5_OUTLIERS_OUTPUT}")
-        # 同步移除只屬於被過濾離群值的孤立溶液
-        if not sol_df.empty and not echem_df.empty and "solution_id" in echem_df.columns:
-            valid_sids = set(echem_df["solution_id"].dropna().unique())
-            sol_df = sol_df[sol_df["solution_id"].isin(valid_sids)].reset_index(drop=True)
-            sol_df.to_csv(STEP5_SOLUTION_OUTPUT, index=False, encoding="utf-8-sig")
+    # 同步移除未在最終有效電化學主表中被引用的孤立溶液
+    if not sol_df.empty and "solution_id" in sol_df.columns:
+        valid_sids = (
+            set(echem_df["solution_id"].dropna().unique())
+            if (not echem_df.empty and "solution_id" in echem_df.columns)
+            else set()
+        )
+        sol_df = sol_df[sol_df["solution_id"].isin(valid_sids)].reset_index(drop=True)
+        sol_df.to_csv(STEP5_SOLUTION_OUTPUT, index=False, encoding="utf-8-sig")
     echem_df.to_csv(STEP5_ECHEM_OUTPUT, index=False, encoding="utf-8-sig")  # ✅
 
     print(f"  Total records: {len(echem_df)}")
