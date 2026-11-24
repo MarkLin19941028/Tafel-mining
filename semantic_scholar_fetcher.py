@@ -206,32 +206,42 @@ def _s2_request_with_retry(
     return None
 
 
-def build_grouped_s2_queries() -> list[str]:
+def build_grouped_s2_queries(modes: list[str] | tuple[str, ...] | str | None = None) -> list[str]:
     """
-    將同一金屬原本 60~72 組展開查詢，濃縮為 3 組（all 模式為 4 組）支援 /paper/search/bulk 的高容量布林查詢。
+    依選取的搜尋模式（corrosion, cmp_etch, inhibitor, catalysis）組裝高容量布林查詢。
     因為 /paper/search/bulk 單次 HTTP 請求即可回傳最多 1,000 篇論文，
-    濃縮為 3 次請求可將 API 呼叫次數減少 ~95%，徹底避免連續請求觸發 429。
+    濃縮為少數布林請求可將 API 呼叫次數減少 >90%，徹底避免連續請求觸發 429。
     """
     target = config.TARGET_METAL
     sym = config.METAL_SYMBOL
     compounds = list(getattr(config, "COMPOUNDS", []))
-    search_mode = getattr(config, "SEARCH_MODE", "corrosion_cmp")
+    if modes is not None:
+        active_modes = config.parse_search_modes(modes)
+    elif hasattr(config, "SEARCH_MODES"):
+        active_modes = list(config.SEARCH_MODES)
+    else:
+        active_modes = config.parse_search_modes(getattr(config, "SEARCH_MODE", "corrosion"))
 
     metal_clause = f'("{target}" | "{sym}")' if target.lower() != sym.lower() else f'"{target}"'
 
     grouped: list[str] = []
 
-    # 1. 主金屬核心動電位極化、Tafel 外推、腐蝕電流與極化電阻
-    if search_mode in ("corrosion", "corrosion_cmp", "all"):
+    # 1. 一般金屬腐蝕極化與化合物／合金腐蝕極化
+    if "corrosion" in active_modes:
         grouped.append(
             f'{metal_clause} + ("potentiodynamic polarization" | "corrosion current density" '
             f'| "polarization resistance" | "electrochemical corrosion" | "Tafel extrapolation" '
             f'| "Tafel slope" | "Tafel plot" | "Ecorr" | "icorr") '
             f'+ ("corrosion" | "polarization" | "anodic" | "cathodic")'
         )
+        if compounds:
+            comp_or = " | ".join(f'"{c}"' for c in compounds)
+            grouped.append(
+                f'({comp_or}) + ("potentiodynamic polarization" | "corrosion current density" | "Tafel slope" | "Ecorr")'
+            )
 
     # 2. 半導體 CMP / 濕蝕刻 / 研磨液 / 氧化劑與電偶腐蝕環境
-    if search_mode in ("cmp_etch", "corrosion_cmp", "all"):
+    if "cmp_etch" in active_modes:
         grouped.append(
             f'{metal_clause} + ("CMP" | "chemical mechanical" | "slurry" | "wet etching" '
             f'| "H2O2" | "hydrogen peroxide" | "KIO4" | "periodate" | "NaClO" | "hypochlorite" '
@@ -239,19 +249,25 @@ def build_grouped_s2_queries() -> list[str]:
             f'+ ("potentiodynamic" | "Tafel" | "Ecorr" | "icorr" | "corrosion current" | "polarization")'
         )
 
-    # 3. 所有化合物與合金腐蝕極化（單一布林 OR 查詢一次取回）
-    if compounds and search_mode in ("corrosion", "corrosion_cmp", "all"):
-        comp_or = " | ".join(f'"{c}"' for c in compounds)
+    # 3. 多樣化緩蝕劑（跨唑類、雜環、胺基酸、含硫氮、界面活性劑、離子液體與無機鈍化劑）
+    if "inhibitor" in active_modes:
         grouped.append(
-            f'({comp_or}) + ("potentiodynamic polarization" | "corrosion current density" | "Tafel slope" | "Ecorr")'
+            f'{metal_clause} + ("corrosion inhibitor" | "corrosion inhibition" | "inhibition efficiency" '
+            f'| "organic inhibitor" | "mixed-type inhibitor" | "benzotriazole" | "tolyltriazole" | "triazole" '
+            f'| "tetrazole" | "imidazole" | "thiazole" | "pyrazole" | "Schiff base" | "amino acid" | "cysteine" '
+            f'| "thiourea" | "surfactant" | "ionic liquid" | "molybdate" | "silicate") '
+            f'+ ("potentiodynamic" | "Tafel" | "Ecorr" | "icorr" | "corrosion current" | "polarization")'
         )
 
-    # 4. 電催化（僅在 SEARCH_MODE == "all" 時加入）
-    if search_mode == "all":
+    # 4. 電催化（HER / OER / ORR / CO2RR / 交換電流密度）
+    if "catalysis" in active_modes:
         grouped.append(
-            f'{metal_clause} + ("Tafel slope" | "exchange current density") '
-            f'+ ("hydrogen evolution" | "oxygen evolution" | "oxygen reduction" | "electrocatalyst")'
+            f'{metal_clause} + ("Tafel slope" | "Tafel plot" | "exchange current density" | "linear sweep voltammetry") '
+            f'+ ("hydrogen evolution" | "oxygen evolution" | "oxygen reduction" | "CO2 reduction" | "electrocatalyst" | "catalyst")'
         )
+        if compounds and "corrosion" not in active_modes:
+            comp_or = " | ".join(f'"{c}"' for c in compounds)
+            grouped.append(f'({comp_or}) + ("Tafel slope" | "electrocatalyst")')
 
     return grouped
 
@@ -283,7 +299,8 @@ def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
 
     priority_terms = (
         "cmp", "chemical mechanical", "slurry", "wet etch", "h2o2",
-        "periodate", "kio4", "naclo", "fe(no3)3", "sc-1", "potentiodynamic",
+        "periodate", "kio4", "naclo", "fe(no3)3", "sc-1", "inhibitor",
+        "inhibition", "triazole", "imidazole", "potentiodynamic",
         "corrosion current", "tafel", "ecorr",
     )
     high = [q for q in normalized if any(t in q.lower() for t in priority_terms)]

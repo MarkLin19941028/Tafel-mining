@@ -276,5 +276,155 @@ class TestStep6Deduplication(unittest.TestCase):
         self.assertTrue((out["data_extraction_method"] == "table_column_mapped").all())
 
 
+class TestNitrideMetalsAndInhibitors(unittest.TestCase):
+    def test_databases_valid_with_wn_and_mon(self):
+        import config
+        from materials_loader import validate_databases
+        from step5_constants import KNOWN_MATERIALS
+        from step7_enrich_data import COMPOUND_OVERRIDES, resolve_base_element
+
+        self.assertIn("WN", config.METALS_TO_RUN)
+        self.assertIn("MoN", config.METALS_TO_RUN)
+        errors, warnings = validate_databases(config.METALS_TO_RUN)
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
+
+        for sym, base in (("WN", "W"), ("MoN", "Mo")):
+            self.assertIn(sym, KNOWN_MATERIALS)
+            self.assertIn(sym, COMPOUND_OVERRIDES)
+            self.assertEqual(resolve_base_element(sym), base)
+            self.assertEqual(classify_material_class(sym, "Blank"), "compound")
+
+    def test_nitride_material_recognition_priority(self):
+        from step5_text_extractor import find_materials
+
+        hits = [sym for _, sym in find_materials("Corrosion of PVD WN, TiN, TaN, and MoN thin films in H2O2")]
+        for expected in ("WN", "TiN", "TaN", "MoN"):
+            self.assertIn(expected, hits)
+
+    def test_diverse_inhibitor_extraction_and_zero_conc_skip(self):
+        from step5_text_extractor import extract_electrolytes, lookup_species_category
+
+        txt = (
+            "Polarization tests were performed in 0.5 M HCl containing "
+            "0 mM BTA, 100 µM 2-mercaptobenzothiazole, 200 mg/L sodium dodecyl sulfate, "
+            "and 5 mM of 1,2,4-triazole."
+        )
+        els = extract_electrolytes(txt)
+        by_species = {e["species"]: e for e in els}
+        # 0 mM BTA must be skipped so Blank isn't treated as active BTA
+        self.assertNotIn("BTA", by_species)
+        self.assertIn("HCl", by_species)
+        for inh in ("MBT", "SDS", "TAZ"):
+            self.assertIn(inh, by_species)
+            self.assertEqual(lookup_species_category(inh)["role"], "inhibitor")
+
+    def test_two_column_inhibitor_conc_table_and_base_medium_retention(self):
+        table = [
+            ["Inhibitor", "Conc. (mM)", "Ecorr (mV vs SCE)", "icorr (uA/cm2)"],
+            ["Blank", "—", "-210", "45.0"],
+            ["tolyltriazole", "1.0", "-185", "8.2"],
+            ["", "5.0", "-170", "2.1"],
+        ]
+        paper_env = {
+            "electrolytes": [{"conc": "0.5", "unit": "M", "species": "HCl", "count": 4}],
+            "ph_counts": Counter({0.3: 2}),
+            "temp_counts": Counter({25.0: 2}),
+            "ref_counts": Counter({"SCE": 3}),
+            "refs": ["SCE"],
+        }
+        recs = parse_structured_table(
+            table,
+            "10.1000_inh_table",
+            0,
+            paper_counts=Counter({"Cu": 10}),
+            paper_env=paper_env,
+        )
+        self.assertEqual(len(recs), 3)
+        for r in recs:
+            r["is_target_metal"] = True
+        sol_df = build_solution_properties(recs).set_index("solution_id")
+        # Blank, 1.0 mM TTA, and carried-forward 5.0 mM TTA must yield 3 distinct solutions
+        self.assertEqual(len(sol_df), 3)
+        self.assertEqual(recs[1]["sample_name"], "tolyltriazole (1.0 mM)")
+        self.assertEqual(recs[2]["sample_name"], "tolyltriazole (5.0 mM)")
+
+        sol_1 = sol_df.loc[recs[1]["solution_id_assigned"]]
+        sol_5 = sol_df.loc[recs[2]["solution_id_assigned"]]
+        self.assertEqual(sol_1["inhibitor_type"], "TTA")
+        self.assertEqual(sol_1["acid_type"], "HCl")
+        self.assertEqual(sol_5["inhibitor_type"], "TTA")
+        self.assertEqual(float(sol_5["inhibitor_concentration"]), 5.0)
+
+    def test_s2_grouped_inhibitor_query_and_step1_append(self):
+        import semantic_scholar_fetcher as s2f
+        from step1_search_openalex import _merge_with_existing_step1
+
+        grouped = s2f.build_grouped_s2_queries()
+        self.assertTrue(any("corrosion inhibitor" in q and "triazole" in q for q in grouped))
+
+        ex = pd.DataFrame([
+            {"doi": "https://doi.org/10.1000/a", "title": "Old A", "best_pdf_url": None, "abstract": ""},
+        ])
+        nw = pd.DataFrame([
+            {"doi": "10.1000/A", "title": "Old A", "best_pdf_url": "https://example.org/a.pdf", "abstract": "Filled"},
+            {"doi": "https://doi.org/10.1000/b", "title": "New B", "best_pdf_url": None, "abstract": "New abs"},
+        ])
+        merged = _merge_with_existing_step1(ex, nw)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged.loc[0, "best_pdf_url"], "https://example.org/a.pdf")
+        self.assertEqual(merged.loc[0, "abstract"], "Filled")
+
+    def test_user_settings_and_modular_search_modes(self):
+        import config
+        import europepmc_fetcher as epmc
+        import run_all
+        import semantic_scholar_fetcher as s2f
+        import user_settings
+
+        # user_settings exports default 3 orthogonal modes
+        self.assertEqual(user_settings.SEARCH_MODES, ["corrosion", "cmp_etch", "inhibitor"])
+        self.assertEqual(config.MAILTO, user_settings.MAILTO)
+
+        # parse_search_modes handles lists, space/comma strings, 'all', and rejects unknown modes
+        self.assertEqual(config.parse_search_modes(["cmp_etch", "inhibitor"]), ["cmp_etch", "inhibitor"])
+        self.assertEqual(config.parse_search_modes("cmp_etch, inhibitor"), ["cmp_etch", "inhibitor"])
+        self.assertEqual(
+            config.parse_search_modes("all"),
+            ["corrosion", "cmp_etch", "inhibitor", "catalysis"],
+        )
+        with self.assertRaises(ValueError):
+            config.parse_search_modes(["cmp_etch", "unknown_mode"])
+
+        # Each engine strictly reflects only the selected modes
+        oa_cmp_inh = config.build_search_queries(["cmp_etch", "inhibitor"])
+        self.assertTrue(any('"CMP"' in q for q in oa_cmp_inh))
+        self.assertTrue(any('"corrosion inhibitor"' in q for q in oa_cmp_inh))
+        self.assertFalse(any('"hydrogen evolution"' in q for q in oa_cmp_inh))
+
+        s2_cat = s2f.build_grouped_s2_queries(["catalysis"])
+        self.assertTrue(any("hydrogen evolution" in q for q in s2_cat))
+        self.assertFalse(any("corrosion inhibitor" in q for q in s2_cat))
+
+        epmc_cmp_inh = epmc.build_europepmc_query(["cmp_etch", "inhibitor"])
+        self.assertIn('"chemical mechanical"', epmc_cmp_inh)
+        self.assertIn('"corrosion inhibitor"', epmc_cmp_inh)
+        self.assertNotIn('"Tafel extrapolation"', epmc_cmp_inh)
+
+        # CLI parser supports both `Cu Co --search-mode cmp_etch inhibitor --append`
+        # and `--search-mode cmp_etch inhibitor Cu Co --append`
+        parser = run_all.build_cli_parser()
+        a1 = parser.parse_args(["Cu", "Co", "--search-mode", "cmp_etch", "inhibitor", "--append"])
+        m1, modes1 = run_all.resolve_cli_metals_and_modes(a1.metals, a1.search_mode, config)
+        self.assertEqual(m1, ["Cu", "Co"])
+        self.assertEqual(modes1, ["cmp_etch", "inhibitor"])
+        self.assertTrue(a1.append)
+
+        a2 = parser.parse_args(["--search-mode", "cmp_etch", "inhibitor", "Cu", "Co", "--append"])
+        m2, modes2 = run_all.resolve_cli_metals_and_modes(a2.metals, a2.search_mode, config)
+        self.assertEqual(m2, ["Cu", "Co"])
+        self.assertEqual(modes2, ["cmp_etch", "inhibitor"])
+
+
 if __name__ == "__main__":
     unittest.main()

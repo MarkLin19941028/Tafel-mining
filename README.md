@@ -10,11 +10,10 @@
 - [環境需求與快速開始](#環境需求與快速開始)
 - [完整指令總覽（macOS / Windows 對照表）](#完整指令總覽macos--windows-對照表)
   - [1. 環境建置與套件安裝](#1-環境建置與套件安裝)
-  - [2. 資料庫檢查與金屬清單](#2-資料庫檢查與金屬清單)
-  - [3. 一鍵批次執行（run_all.py）](#3-一鍵批次執行run_allpy)
-  - [4. 單步驟獨立執行（Step 1 ~ Step 7）](#4-單步驟獨立執行step-1--step-7)
-  - [5. 指定單一金屬與環境變數控制](#5-指定單一金屬與環境變數控制)
-  - [6. 單元測試](#6-單元測試)
+  - [2. 一鍵執行主程式（run_all.py）](#2-一鍵執行主程式run_allpy)
+  - [3. 單步驟獨立執行（Step 1 ~ Step 7）](#3-單步驟獨立執行step-1--step-7)
+  - [4. 指定單一金屬與環境變數控制](#4-指定單一金屬與環境變數控制)
+  - [5. 單元測試](#5-單元測試)
 - [設定檔與產出結構](#設定檔與產出結構)
 - [相依函式庫說明](#相依函式庫說明)
 - [常見問題與排錯指南](#常見問題與排錯指南)
@@ -37,7 +36,7 @@ flowchart LR
 
 | 步驟 | 對應腳本 | 主要工作 |
 |---|---|---|
-| **Step 1** | `step1_search_openalex.py` | 依金屬與 `SEARCH_MODE` 查詢 OpenAlex（與 Semantic Scholar），輸出文獻 metadata CSV |
+| **Step 1** | `step1_search_openalex.py` | 依金屬與 `SEARCH_MODES` 查詢 OpenAlex（與 Semantic Scholar），輸出文獻 metadata CSV |
 | **Step 2** | `step2_find_pdf_urls.py` | 透過 Unpaywall（與 Semantic Scholar）依 DOI 找出合法開放取用（OA）PDF 連結 |
 | **Step 3** | `step3_download_pdfs.py` | 下載 OA PDF，並自動透過 `europepmc_fetcher.py` 補抓 Europe PMC 開放全文 XML 與結構化表格 |
 | **Step 4** | `step4_extract_text.py` | 使用 PyMuPDF 抽取純文字（`.txt`）、pdfplumber 抽取表格（`_tables.json`） |
@@ -65,7 +64,7 @@ flowchart LR
    SEMANTIC_SCHOLAR_API_KEY=你的_S2_Key
    MP_API_KEY=你的_Materials_Project_Key
    ```
-   並打開 `config.py`，將 `MAILTO` 改成你的 Email（OpenAlex 與 Unpaywall polite pool 用）。
+   並打開 `user_settings.py`，將 `MAILTO` 改成你的 Email（OpenAlex 與 Unpaywall polite pool 用）。
 3. **驗證資料庫與設定是否正常**：
    - macOS：`.venv/bin/python run_all.py --check-db`
    - Windows：`.venv\Scripts\python.exe run_all.py --check-db`
@@ -92,31 +91,30 @@ flowchart LR
 | 選用安裝 DFT Pourbaix 套件 | `.venv/bin/pip install "mp-api>=0.41.0" "pymatgen>=2024.1.1"` | `.venv\Scripts\pip.exe install "mp-api>=0.41.0" "pymatgen>=2024.1.1"` |
 | 複製環境變數範本檔 | `cp .env.example .env` | PowerShell: `Copy-Item .env.example .env`<br>CMD: `copy .env.example .env` |
 
-### 2. 資料庫檢查與金屬清單
+### 2. 一鍵執行主程式（`run_all.py`）
 
-| 操作說明 | macOS / Linux | Windows (PowerShell / CMD) |
+日常探勘只需操作 `run_all.py`，它會自動依序執行各金屬的 Step 1~5，最後執行 Step 6 跨金屬合併與 Step 7 特徵強化。
+
+> 💡 為求版面精簡，本節以 `python` 代表虛擬環境執行檔：若未先 `activate`，macOS / Linux 請改用 `.venv/bin/python`，Windows 請改用 `.venv\Scripts\python.exe`。
+
+#### 依常見需求選擇指令
+
+| 你的需求 | 指令範例 | 說明 |
 |---|---|---|
-| 列出所有支援金屬與 `METALS_TO_RUN` | `.venv/bin/python run_all.py --list` | `.venv\Scripts\python.exe run_all.py --list` |
-| 檢查 `metals_db.json` 與 `materials_physics.json` 一致性 | `.venv/bin/python run_all.py --check-db` | `.venv\Scripts\python.exe run_all.py --check-db` |
-| 查看 `run_all.py` 所有參數說明 | `.venv/bin/python run_all.py --help` | `.venv\Scripts\python.exe run_all.py --help` |
+| **先跑單一／少數金屬試水溫** | `python run_all.py Cu`<br>`python run_all.py Cu Co W` | 只對指定金屬跑完 Step 1~7（符號不分大小寫），適合初次測試 |
+| **正式跑完所有預設金屬** | `python run_all.py` | 依 `user_settings.py` 的 `METALS_TO_RUN` 跑完所有金屬與合併強化 |
+| **已抓過文獻，只想從中途步驟重跑** | `python run_all.py --from-step 5`<br>`python run_all.py --from-step 6`<br>`python run_all.py --from-step 7` | 跳過耗時的搜尋與下載（支援 `1`~`7`，亦可搭配金屬名稱）：<br>• `5`：重跑參數萃取 + 合併 + 強化<br>• `6`：只重跑跨金屬合併 + 強化<br>• `7`：只重跑 MP / Pourbaix 特徵強化 |
+| **保留舊資料，補抓其他主題文獻** | `python run_all.py Cu --search-mode cmp_etch inhibitor --append` | `--search-mode` 可多選（`corrosion`、`cmp_etch`、`inhibitor`、`catalysis`、`all`），搭配 `--append` 依 DOI 去重合併 |
+| **忽略快取，從頭強制重抓某金屬** | `python run_all.py Cu --force` | 忽略 Step 1/2 斷點續跑設定，重新查詢 API 並覆寫舊清單 |
+| **查看支援金屬／驗證自訂資料庫** | `python run_all.py --list`<br>`python run_all.py --check-db` | `--list` 查看可用金屬清單；編輯 JSON 新增金屬後請跑 `--check-db` 檢查格式 |
 
-### 3. 一鍵批次執行（`run_all.py`）
+#### 進階控制開關（可自由疊加）
+- **只跑前段、暫不合併或強化**：加上 `--no-merge`（跑完 Step 5 即停）或 `--no-enrich`（跑完 Step 6 合併即停，跳過 Step 7），例如：`python run_all.py TiN --from-step 4 --no-enrich`。
+- **查看完整參數說明**：`python run_all.py --help`。
 
-| 操作說明 | macOS / Linux | Windows (PowerShell / CMD) |
-|---|---|---|
-| 執行 `config.py` 中全部 `METALS_TO_RUN` + Step 6 + Step 7 | `.venv/bin/python run_all.py` | `.venv\Scripts\python.exe run_all.py` |
-| 臨時只執行指定金屬（可多個，不分大小寫） | `.venv/bin/python run_all.py Cu Co W` | `.venv\Scripts\python.exe run_all.py Cu Co W` |
-| 從第 N 步驟開始執行（支援 `1`~`7`） | `.venv/bin/python run_all.py --from-step 5` | `.venv\Scripts\python.exe run_all.py --from-step 5` |
-| 只重跑 Step 6 合併 + Step 7 特徵強化 | `.venv/bin/python run_all.py --from-step 6` | `.venv\Scripts\python.exe run_all.py --from-step 6` |
-| 只重跑 Step 7（Materials Project + Pourbaix） | `.venv/bin/python run_all.py --from-step 7` | `.venv\Scripts\python.exe run_all.py --from-step 7` |
-| 強制重跑指定金屬（忽略 Step 1/2 斷點略過） | `.venv/bin/python run_all.py Cu --force` | `.venv\Scripts\python.exe run_all.py Cu --force` |
-| 跑完金屬後不執行 Step 6 合併（連帶不跑 Step 7） | `.venv/bin/python run_all.py Cu --no-merge` | `.venv\Scripts\python.exe run_all.py Cu --no-merge` |
-| 跑完金屬與合併，但不執行 Step 7 強化 | `.venv/bin/python run_all.py Cu --no-enrich` | `.venv\Scripts\python.exe run_all.py Cu --no-enrich` |
-| 組合範例：只針對 `TiN`、`TaN` 重跑 Step 4~6 | `.venv/bin/python run_all.py TiN TaN --from-step 4 --no-enrich` | `.venv\Scripts\python.exe run_all.py TiN TaN --from-step 4 --no-enrich` |
+### 3. 單步驟獨立執行（Step 1 ~ Step 7）
 
-### 4. 單步驟獨立執行（Step 1 ~ Step 7）
-
-> 單獨執行 Step 1~5 時，預設使用 `config.py` 中的 `DEFAULT_METAL`（預設為 `Cu`）；若要切換金屬，請搭配下方第 5 節的 `TAFEL_METAL` 環境變數。
+> 單獨執行 Step 1~5 時，預設使用 `user_settings.py` 中的 `DEFAULT_METAL`（預設為 `Cu`）；若要切換金屬，請搭配下方第 4 節的 `TAFEL_METAL` 環境變數。
 
 | 步驟 / 說明 | macOS / Linux | Windows (PowerShell / CMD) |
 |---|---|---|
@@ -132,17 +130,18 @@ flowchart LR
 | Step 7：完全離線模式（僅用快取與內建表） | `.venv/bin/python step7_enrich_data.py --offline` | `.venv\Scripts\python.exe step7_enrich_data.py --offline` |
 | Step 7：包含合金與塗層（`alloy` / `coating_composite`） | `.venv/bin/python step7_enrich_data.py --include-alloys` | `.venv\Scripts\python.exe step7_enrich_data.py --include-alloys` |
 
-### 5. 指定單一金屬與環境變數控制
+### 4. 指定單一金屬與環境變數控制
 
 | 環境變數與用途 | macOS / Linux | Windows (PowerShell) | Windows (CMD) |
 |---|---|---|---|
 | `TAFEL_METAL`：單跑 Step 1~5 時指定金屬（例：`Co`） | `TAFEL_METAL=Co .venv/bin/python step5_extract_data.py` | `$env:TAFEL_METAL="Co"; .venv\Scripts\python.exe step5_extract_data.py` | `set TAFEL_METAL=Co && .venv\Scripts\python.exe step5_extract_data.py` |
+| `TAFEL_SEARCH_MODES`：單跑腳本時覆蓋搜尋模式組合 | `TAFEL_SEARCH_MODES="cmp_etch,inhibitor" .venv/bin/python step1_search_openalex.py` | `$env:TAFEL_SEARCH_MODES="cmp_etch,inhibitor"; .venv\Scripts\python.exe step1_search_openalex.py` | `set TAFEL_SEARCH_MODES=cmp_etch,inhibitor && .venv\Scripts\python.exe step1_search_openalex.py` |
 | `TAFEL_FORCE_S2_REFRESH=1`：強制重新查詢 Semantic Scholar（忽略本地快取） | `TAFEL_FORCE_S2_REFRESH=1 .venv/bin/python run_all.py Cu --force` | `$env:TAFEL_FORCE_S2_REFRESH="1"; .venv\Scripts\python.exe run_all.py Cu --force` | `set TAFEL_FORCE_S2_REFRESH=1 && .venv\Scripts\python.exe run_all.py Cu --force` |
 | `TAFEL_QUIET_CONFIG=1`：靜默載入設定（不印出 banner、不自動建資料夾） | `TAFEL_QUIET_CONFIG=1 .venv/bin/python step6_merge.py` | `$env:TAFEL_QUIET_CONFIG="1"; .venv\Scripts\python.exe step6_merge.py` | `set TAFEL_QUIET_CONFIG=1 && .venv\Scripts\python.exe step6_merge.py` |
 
 > **PowerShell 注意事項**：`$env:VAR="value"` 會在當前視窗持續生效，執行完若想清除可輸入 `Remove-Item Env:TAFEL_METAL`。
 
-### 6. 單元測試
+### 5. 單元測試
 
 | 操作說明 | macOS / Linux | Windows (PowerShell / CMD) |
 |---|---|---|
@@ -154,14 +153,15 @@ flowchart LR
 ## 設定檔與產出結構
 
 ### 核心設定檔
-- **`config.py`**：中央設定檔，常用調整項目：
+- **`user_settings.py`**：**所有日常可自定義參數的唯一入口**，常用調整項目：
   - `MAILTO`：OpenAlex / Unpaywall 聯絡 Email。
-  - `METALS_TO_RUN`：預設批次執行的金屬清單（目前支援 11 種：`Cu, Co, W, Ru, Ti, TiN, TaN, Al, Ta, Mn, Mo`）。
-  - `SEARCH_MODE`：`corrosion`、`cmp_etch`、`corrosion_cmp`（預設推薦）、`all`。
+  - `METALS_TO_RUN`：預設批次執行的金屬清單（目前支援 13 種：`Cu, Co, W, Ru, Ti, TiN, TaN, WN, MoN, Al, Ta, Mn, Mo`）。
+  - `SEARCH_MODES`：可自由多選組合 4 種正交搜尋模組——`corrosion`（一般腐蝕）、`cmp_etch`（CMP／濕蝕刻）、`inhibitor`（多樣化緩蝕劑）、`catalysis`（電催化）；預設啟用前 3 項。執行 `run_all.py` 時亦可用 `--search-mode cmp_etch inhibitor` 臨時組合覆蓋。
   - `MAX_RECORDS_PER_QUERY`：每組關鍵字抓取上限（測試建議 `50`，正式建議 `200`~`300`）。
   - `SKIP_EXISTING_STEP1` / `SKIP_EXISTING_STEP2`：是否啟用斷點續跑。
   - `ENABLE_SEMANTIC_SCHOLAR` / `ENABLE_EUROPEPMC_XML` / `ENABLE_MP_API`：外部資料源開關。
   - `FILTER_OUTLIERS`：是否自動濾除超出物理合理區間的離群值（被濾除的資料會保留於 `*_filtered_outliers.csv`）。
+- **`config.py`**：內部設定載入與衍生引擎（讀取 `user_settings.py`、`.env` 與 `metals_db.json`，自動展開關鍵字、路徑與正規表示式，日常無須手動編輯）。
 - **`metals_db.json`**：各金屬的英文名稱、化合物清單、專屬 CMP 查詢詞與 $E_{\text{corr}}$ 合理電位區間。
 - **`materials_physics.json`**：元素與化合物的物理常數、標準電極電位與 Pourbaix 熱力學參數。
   > 新增自訂金屬時，請同步編輯這兩個 JSON 檔，並執行 `run_all.py --check-db` 確認無誤。
@@ -211,11 +211,11 @@ data/
 | 問題現象 | 常見原因 | 解決方式 |
 |---|---|---|
 | **`ModuleNotFoundError: No module named 'pymupdf'`** | 1. 沒使用 `.venv` 的 Python<br>2. 安裝到舊版 `PyMuPDF < 1.24.0` | 確認使用 `.venv/bin/python`（或 `.venv\Scripts\python.exe`），並執行 `pip install --upgrade "pymupdf>=1.24.0"`。 |
-| **API 回傳 `429 Too Many Requests`** | OpenAlex 或 Semantic Scholar 公開 IP 免費額度達上限 | 在 `.env` 填入 `OPENALEX_API_KEY` 與 `SEMANTIC_SCHOLAR_API_KEY`；若無 S2 Key，可在 `config.py` 將 `SEMANTIC_SCHOLAR_DELAY` 調大或暫設 `ENABLE_SEMANTIC_SCHOLAR = False`。 |
+| **API 回傳 `429 Too Many Requests`** | OpenAlex 或 Semantic Scholar 公開 IP 免費額度達上限 | 在 `.env` 填入 `OPENALEX_API_KEY` 與 `SEMANTIC_SCHOLAR_API_KEY`；若無 S2 Key，可在 `user_settings.py` 將 `SEMANTIC_SCHOLAR_DELAY` 調大或暫設 `ENABLE_SEMANTIC_SCHOLAR = False`。 |
 | **Step 3 大量 PDF 回傳 `403 Forbidden`** | 出版商網站（如 Elsevier/Wiley）的 WAF 防爬蟲阻擋 | 屬正常現象。程式已內建 **Europe PMC 開放全文 XML** 自動補位（免 Key、無 403 且含原生結構化表格），不影響後續萃取。 |
 | **Step 5 顯示「沒有任何文字檔，略過」** | `data/<METAL>/texts/` 內沒有 `.txt` 檔（Step 3/4 未執行或下載全數失敗） | 先跑 `--from-step 3` 或單獨執行 `europepmc_fetcher.py` 取得開放全文。 |
 | **Step 6 合併時缺少某個金屬** | 該金屬的 `extracted/` 下缺少三張必要 CSV 之一（`material_properties`、`solution_properties`、`electrochemical_database`） | 對該金屬重跑 `--from-step 5`，確認三張 CSV 皆已產出後再執行 `step6_merge.py`。 |
 | **Step 7 顯示 Offline 或沒裝 `mp-api`** | 未設定 `MP_API_KEY` 或 Python 3.13/3.14 尚未安裝 `mp-api`/`pymatgen` | **不影響執行**：無 `mp-api` 時會自動透過 REST API v2 抓取 MP 資料；無 `MP_API_KEY` 時也會用內建熱力學常數與 Pourbaix 引擎完成輸出。 |
 | **Windows PowerShell 無法執行 `Activate.ps1`** | Windows 預設禁止執行未簽署腳本（ExecutionPolicy） | 最簡單解法：**不需 activate**，直接使用 `.venv\Scripts\python.exe ...`；或執行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。 |
-| **改了 `config.py` 但重跑沒生效** | Step 1/2 啟用了斷點續跑，或 Semantic Scholar / MP 讀到舊快取 | 加上 `--force` 重跑 Step 1/2；重抓 S2 請加 `TAFEL_FORCE_S2_REFRESH=1`；重抓 MP 請跑 `step7_enrich_data.py --refresh-cache`。 |
+| **改了 `user_settings.py` 但重跑沒生效** | Step 1/2 啟用了斷點續跑，或 Semantic Scholar / MP 讀到舊快取 | 加 `--append`（增量合併）或 `--force`（強制覆寫）重跑 Step 1/2；重抓 S2 請加 `TAFEL_FORCE_S2_REFRESH=1`；重抓 MP 請跑 `step7_enrich_data.py --refresh-cache`。 |
 | **新增金屬後報錯** | `metals_db.json` 或 `materials_physics.json` 格式或欄位不完整 | 執行 `run_all.py --check-db`，依 `[ERROR]` / `[WARN]` 提示補齊欄位。 |

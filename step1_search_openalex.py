@@ -4,6 +4,7 @@ Step 1: 用 OpenAlex API 搜尋目標金屬相關電化學文獻，存成 CSV
 
 """
 
+import os
 import time
 
 import requests
@@ -286,7 +287,45 @@ def _merge_sources(oa_df: pd.DataFrame, s2_df: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-def run_search():
+def _merge_with_existing_step1(existing_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    """增量補抓模式：依標準化 DOI 合併既有 Step 1 CSV 與新檢索結果，保留既有資料並補入新論文。"""
+    if existing_df.empty:
+        return new_df
+    if new_df.empty:
+        return existing_df
+
+    ex = existing_df.copy()
+    nw = new_df.copy()
+    ex["_doi_key"] = ex["doi"].apply(_normalize_doi_key)
+    nw["_doi_key"] = nw["doi"].apply(_normalize_doi_key)
+
+    ex = ex[ex["_doi_key"] != ""].drop_duplicates(subset=["_doi_key"], keep="first")
+    nw = nw[nw["_doi_key"] != ""].drop_duplicates(subset=["_doi_key"], keep="first")
+
+    ex_keys = set(ex["_doi_key"])
+    nw_by_doi = nw.set_index("_doi_key").to_dict(orient="index")
+
+    for idx, row in ex.iterrows():
+        k = row["_doi_key"]
+        if k in nw_by_doi:
+            nrow = nw_by_doi[k]
+            if (pd.isna(row.get("best_pdf_url")) or not str(row.get("best_pdf_url")).startswith("http")) and nrow.get("best_pdf_url"):
+                ex.at[idx, "best_pdf_url"] = nrow.get("best_pdf_url")
+            if (pd.isna(row.get("abstract")) or not str(row.get("abstract")).strip()) and nrow.get("abstract"):
+                ex.at[idx, "abstract"] = nrow.get("abstract")
+
+    added = nw[~nw["_doi_key"].isin(ex_keys)].copy()
+    merged = pd.concat([ex, added], ignore_index=True).drop(columns=["_doi_key"], errors="ignore")
+    print(
+        f"[Step 1 Append] 既有: {len(ex)} | 本次搜尋唯一 DOI: {len(nw)} "
+        f"| 新增論文: {len(added)} | 合併後合計: {len(merged)}"
+    )
+    return merged
+
+
+def run_search(append: bool | None = None):
+    if append is None:
+        append = os.environ.get("TAFEL_APPEND") == "1"
 
     all_records = []
 
@@ -317,6 +356,13 @@ def run_search():
             s2_df = pd.DataFrame(s2_recs).dropna(subset=["doi"])
 
     df = _merge_sources(oa_df, s2_df)
+
+    if append and os.path.exists(STEP1_OUTPUT):
+        try:
+            existing_df = pd.read_csv(STEP1_OUTPUT)
+            df = _merge_with_existing_step1(existing_df, df)
+        except Exception as e:
+            print(f"  ⚠️ 無法讀取既有 Step 1 檔案進行合併 ({e})，改以本次結果輸出。")
 
     df.to_csv(STEP1_OUTPUT, index=False, encoding="utf-8-sig")
 

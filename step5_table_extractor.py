@@ -23,9 +23,11 @@ from step5_constants import (
     parse_scientific,
 )
 from step5_text_extractor import (
+    SPECIES_CATEGORIES,
     assign_material,
     format_counts,
     generate_solution_id,
+    normalise_species,
     select_environment_for_record,
     select_ref_electrode,
 )
@@ -34,8 +36,21 @@ from step5_text_extractor import (
 # 10. TABLE EXTRACTION (Column-Mapped Structured Parser)
 # ====================================================================
 
+_INHIBITOR_SPECIES_SORTED = sorted(
+    [k for k, v in SPECIES_CATEGORIES.items() if v.get("role") == "inhibitor"],
+    key=len,
+    reverse=True,
+)
+_INHIBITOR_NAME_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<inh>"
+    + "|".join(re.escape(s).replace(r"\ ", r"\s+") for s in _INHIBITOR_SPECIES_SORTED)
+    + r")(?![A-Za-z0-9])",
+    re.I,
+)
+
 _COL_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("sample", re.compile(r"\b(?:specimen|sample|electrode|alloy|material|coating|inhibitor|catalyst|system|condition|substrate)\b", re.I)),
+    ("conc", re.compile(r"(?:\bconc(?:entration)?\.?\b|\bc\s*_?\s*inh\b|\bdosage\b|^\s*c\s*[\(\[/])", re.I)),
+    ("sample", re.compile(r"\b(?:specimen|sample|electrode|alloy|material|coating|inhibitor|additive|medium|solution|catalyst|system|condition|substrate)\b", re.I)),
     ("Ecorr", re.compile(r"(?:e\s*_?\s*corr|corrosion\s+potential|\bocp\b)", re.I)),
     ("log_icorr", re.compile(r"\b(?:log|lg)\s*\(?\s*[ij]\s*_?\s*corr", re.I)),
     ("icorr", re.compile(r"(?:[ij]\s*_?\s*corr|corrosion\s+current)", re.I)),
@@ -147,8 +162,9 @@ def parse_structured_table(
                         col_map[c_idx] = (role, u_txt)
             data_start += 1
 
-    # 找 sample 欄位（若表頭沒標出，預設用第 0 欄只要它不是電化學數值欄）
+    # 找 sample 與 conc 欄位（若表頭沒標出 sample，預設用第 0 欄只要它不是電化學數值或濃度欄）
     sample_col = next((i for i, (r, _) in col_map.items() if r == "sample"), None)
+    conc_info = next(((i, u) for i, (r, u) in col_map.items() if r == "conc"), None)
     if sample_col is None and 0 not in col_map:
         sample_col = 0
 
@@ -164,6 +180,11 @@ def parse_structured_table(
         # 若整篇論文只有單一編號表格（例如跨頁拆表或無編號附表），沿用該唯一表題
         table_caption = next(iter(table_captions.values()))
     header_text = " | ".join(normalize_text(str(c or "")) for c in table[header_row_idx])
+    caption_inhibitors = list(dict.fromkeys(
+        normalise_species(m.group("inh"))
+        for m in _INHIBITOR_NAME_RE.finditer(f"{header_text} {table_caption}")
+    ))
+    single_table_inhibitor = caption_inhibitors[0] if len(caption_inhibitors) == 1 else None
     table_ref = select_ref_electrode([header_text, table_caption], ref_counts)
     primary_ref = table_ref or (refs[0] if refs else None)
     ordered_refs = (
@@ -183,12 +204,46 @@ def parse_structured_table(
     paper_primary = paper_counts.most_common(1)[0][0] if paper_counts else None
 
     records = []
+    carry_sample_name: str | None = None
     for row_offset, row in enumerate(table[data_start:], start=1):
         norm_row = [normalize_text(str(c or "")).replace("\n", " ").strip() for c in row]
         row_text = " | ".join(norm_row)
-        sample_name = norm_row[sample_col] if (sample_col is not None and sample_col < len(norm_row)) else None
-        if sample_name == "":
-            sample_name = None
+        raw_sample = norm_row[sample_col] if (sample_col is not None and sample_col < len(norm_row)) else None
+        if raw_sample == "":
+            raw_sample = None
+
+        # 支援緩蝕劑表格跨列合併儲存格（例如 Inhibitor 欄只在第一濃度列寫 "BTA"，後續列留白）
+        if raw_sample is not None:
+            if not re.fullmatch(r"blank|control|unhibited|uninhibited|bare|0", raw_sample, re.I):
+                carry_sample_name = raw_sample
+            else:
+                carry_sample_name = None
+        elif conc_info is not None and carry_sample_name is not None:
+            raw_sample = carry_sample_name
+
+        sample_name = raw_sample
+        synth_inh_ctx = ""
+        if conc_info is not None and conc_info[0] < len(norm_row):
+            conc_cell = norm_row[conc_info[0]]
+            conc_unit = conc_info[1] or "mM"
+            conc_val = parse_scientific(conc_cell)
+            if conc_cell and conc_val is None and sample_name is None:
+                # 單一濃度欄且該列為文字標籤（如 "Blank"、"Control"）
+                sample_name = conc_cell
+            elif conc_val is not None:
+                has_unit_inline = bool(re.search(r"[A-Za-z%]", conc_cell) and not re.search(r"[eE][+\-]?\d+$", conc_cell))
+                conc_expr = conc_cell if has_unit_inline else f"{conc_cell} {conc_unit}".strip()
+                if sample_name:
+                    if conc_cell not in sample_name:
+                        sample_name = f"{sample_name} ({conc_expr})"
+                    if conc_val > 0:
+                        synth_inh_ctx = f"{conc_expr} {raw_sample}"
+                else:
+                    if single_table_inhibitor and conc_val > 0:
+                        sample_name = f"{single_table_inhibitor} ({conc_expr})"
+                        synth_inh_ctx = f"{conc_expr} {single_table_inhibitor}"
+                    else:
+                        sample_name = conc_expr
 
         rec_notes = []
         ecorr_v_orig = ecorr_v_she = ecorr_raw = ecorr_unit = None
@@ -197,7 +252,7 @@ def parse_structured_table(
         cr_val = cr_unit = rp_val = rp_unit = None
 
         for c_idx, (role, unit) in col_map.items():
-            if role == "sample" or c_idx >= len(norm_row):
+            if role in ("sample", "conc") or c_idx >= len(norm_row):
                 continue
             cell_str = norm_row[c_idx]
             val = parse_scientific(cell_str)
@@ -269,7 +324,7 @@ def parse_structured_table(
         if not any(x is not None for x in (ecorr_v_orig, icorr_uA, beta_a, beta_c, tafel_gen, cr_val, rp_val)):
             continue
 
-        ctxs = [sample_name or "", row_text, table_caption]
+        ctxs = [synth_inh_ctx, sample_name or "", row_text, table_caption]
         mat_id, mat_method = assign_material([sample_name or "", row_text], paper_counts or Counter())
         rec_els, rec_ph, rec_temp = select_environment_for_record(
             ctxs, paper_els, paper_ph_counts, paper_temp_counts

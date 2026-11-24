@@ -44,7 +44,7 @@ if not SIMULATOR_DATA_DIR.parent.exists():
     print(f"⚠️  WARNING: corrosion_simulator directory not found at:")
     print(f"   {SIMULATOR_DATA_DIR.parent}")
     print(f"   Will create output at: {SIMULATOR_DATA_DIR}")
-    print(f"   If this is wrong, edit SIMULATOR_DATA_DIR in config.py")
+    print(f"   If this is wrong, edit SIMULATOR_DATA_DIR in user_settings.py")
 
 os.makedirs(SIMULATOR_DATA_DIR, exist_ok=True)
 

@@ -68,26 +68,50 @@ TAFEL_CATHODIC_PATTERN = re.compile(
 
 # 依長度由長到短排列，避免 NaCl 截斷 NaClO4、HCl 截斷 HClO4
 _ELECTROLYTE_SPECIES = sorted([
+    # --- 酸 / 鹼 / 氧化劑 / 緩衝液 / 有機溶劑 / 螯合劑 ---
     "tetramethylammonium hydroxide", "ammonium hydroxide", "hydrogen peroxide",
     "hydrofluoric acid", "phosphate buffer", "borate buffer", "ethylene glycol",
-    "benzotriazole", "citric acid", "oxalic acid", "acetic acid", "isopropanol",
-    "K3Fe(CN)6", "K4Fe(CN)6", "Na2B4O7", "Na2HPO4", "KH2PO4", "K2HPO4", "NaH2PO4",
+    "citric acid", "oxalic acid", "acetic acid", "malic acid", "tartaric acid",
+    "isopropanol", "(NH4)2S2O8", "Fe(NO3)3", "K3Fe(CN)6", "K4Fe(CN)6",
+    "K2S2O8", "Na2S2O8", "Na2B4O7", "Na2HPO4", "KH2PO4", "K2HPO4", "NaH2PO4",
     "NaHCO3", "KHCO3", "NaClO4", "Na2SO4", "Na2CO3", "K2SO4", "K2CO3",
     "H2SO4", "H₂SO₄", "HClO4", "H3PO4", "NH4OH", "NH₄OH", "CuSO4", "CuCl2",
-    "FeCl3", "H2O2", "H₂O₂", "HNO3", "NaOH", "NaCl", "KNO3", "NaNO3",
-    "LiOH", "TMAH", "EDTA", "DMSO", "glycine",
-    "KOH", "HCl", "KCl", "PBS", "BTA", "MBI", "IPA", "NMP", "HF", "EG",
+    "FeCl3", "KIO4", "KIO3", "NaClO", "H2O2", "H₂O₂", "HNO3", "NaOH", "NaCl",
+    "KNO3", "NaNO3", "LiOH", "TMAH", "EDTA", "DMSO", "glycine",
+    "KOH", "HCl", "KCl", "PBS", "IPA", "NMP", "HF", "EG",
+    # --- 多樣化腐蝕與 CMP 緩蝕劑（唑類、雜環、含硫氮、胺基酸、界面活性劑、高分子、無機鹽）---
+    "5-mercapto-1-phenyl-1H-tetrazole", "5-mercapto-1-phenyltetrazole",
+    "sodium dodecylbenzenesulfonate", "cetyltrimethylammonium bromide",
+    "3-amino-1,2,4-triazole", "2-mercaptobenzothiazole", "2-mercaptobenzimidazole",
+    "hexamethylenetetramine", "sodium dodecyl sulfate", "polyvinylpyrrolidone",
+    "polyethylene glycol", "polyethyleneimine", "8-hydroxyquinoline",
+    "thiosemicarbazide", "5-aminotetrazole", "monoethanolamine",
+    "potassium oleate", "polyacrylic acid", "1,3,4-thiadiazole",
+    "sodium molybdate", "sodium silicate", "sodium tungstate", "sodium benzoate",
+    "1,2,4-triazole", "aminotetrazole", "benzotriazole", "tolyltriazole",
+    "benzimidazole", "sodium oleate", "sodium nitrite", "glutamic acid",
+    "aspartic acid", "L-tryptophan", "Triton X-100", "L-methionine",
+    "L-histidine", "L-cysteine", "L-arginine", "tryptophan", "methionine",
+    "urotropine", "L-alanine", "histidine", "imidazole", "Ce(NO3)3",
+    "L-lysine", "cysteine", "thiourea", "pyrazole", "thiazole", "pyridine",
+    "Tween-80", "Tween 80", "arginine", "K2Cr2O7", "Na2MoO4", "Na2SiO3",
+    "Na2WO4", "adenine", "guanine", "alanine", "purine", "lysine",
+    "CeCl3", "NaNO2", "5-AT", "8-HQ", "CTAB", "DTAB", "HMTA", "SDBS",
+    "BTA", "TTA", "TAZ", "ATA", "MBI", "MBT", "MPT", "BIA", "MEA",
+    "SDS", "PEG", "PEI", "PAA", "PVP", "TU",
 ], key=len, reverse=True)
 
 _SPECIES_REGEX = "|".join(
     re.escape(s).replace(r"\ ", r"\s+") for s in _ELECTROLYTE_SPECIES
 )
 
-# 單位中 M / mM 區分大小寫，避免 10 m (公尺/分鐘) 被誤判成 10 M
+# 單位中 M / mM / µM 區分大小寫，避免 10 m (公尺/分鐘) 被誤判成 10 M
 ELECTROLYTE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.])(?P<conc>\d+(?:\.\d+)?)\s*"
-    r"(?P<unit>mM|M|mol\s*(?:L|l)[\-−–]1|mol\s*/\s*(?:L|l)|(?i:wt\s*%)|%|(?i:ppm)|g\s*/\s*L)"
-    r"[\s\n]+"
+    r"(?P<unit>(?:m|µ|μ|u)?M|(?i:m|µ|μ|u)?mol\s*(?:L|l|dm)\s*[\-−–]\s*[13]"
+    r"|(?i:m|µ|μ|u)?mol\s*/\s*(?:L|l|dm3)|N|(?i:wt\.?\s*%)|(?i:vol\.?\s*%)|%"
+    r"|(?i:ppm)|(?i:m?g\s*/\s*(?:L|l|dm3))|(?i:m?g\s+(?:L|l|dm)\s*[\-−–]\s*[13]))"
+    r"[\s\n]+(?:of[\s\n]+)?"
     r"(?P<species>(?i:" + _SPECIES_REGEX + r"))(?![A-Za-z0-9₀-₉])"
 )
 
@@ -266,8 +290,8 @@ _BASE_SYMBOLS, _NAME_TO_SYMBOL, _MATERIAL_ALIASES = build_text_recognition_table
 _NAME_TO_SYMBOL.setdefault(TARGET_METAL.lower(), METAL_SYMBOL)
 
 _ALL_SYMBOLS = sorted(
-    set(_BASE_SYMBOLS) | set(KNOWN_MATERIALS.keys()) | {METAL_SYMBOL, "WN"},
-    key=len, reverse=True,          # 長的先比對：TiN 先於 Ti
+    set(_BASE_SYMBOLS) | set(KNOWN_MATERIALS.keys()) | {METAL_SYMBOL, "WN", "MoN"},
+    key=len, reverse=True,          # 長的先比對：TiN / MoN 先於 Ti / Mo
 )
 
 SYMBOL_PATTERN = re.compile(
@@ -310,18 +334,19 @@ def find_materials(text: str) -> list[tuple[str, str]]:
     """回傳 [(原始字串, 標準化符號), ...]，依出現順序。"""
     found = []
     for m in NAME_PATTERN.finditer(text):
-        found.append((m.start(), m.group("name"),
-                      _NAME_TO_SYMBOL[m.group("name").lower()]))
+        raw = m.group("name")
+        found.append((m.start(), -len(raw), 0, raw, _NAME_TO_SYMBOL[raw.lower()]))
     for m in SYMBOL_PATTERN.finditer(text):
         sym = m.group("sym")
         if not _is_noise(sym, text, m.start(), m.end()):
-            found.append((m.start(), sym, sym))
-    # 目標金屬的化合物（config.COMPOUNDS，例如 copper foam、Cu3P）
+            found.append((m.start(), -len(sym), 0, sym, sym))
+    # 目標金屬的化合物（config.COMPOUNDS，例如 copper foam、Cu3P、W2N thin film）
     for m in TARGET_PATTERN.finditer(text):
-        found.append((m.start(), m.group(0), METAL_SYMBOL))
-    # 同一位置可能被多個 pattern 命中 → 去重
+        raw = m.group(0)
+        found.append((m.start(), -len(raw), 1, raw, METAL_SYMBOL))
+    # 同一位置可能被多個 pattern 命中 → 優先取匹配較長且為精確材料符號/名稱者（例如 TiN 優先於 Ti）
     seen, out = set(), []
-    for pos, raw, sym in sorted(found):
+    for pos, _neg_len, _prio, raw, sym in sorted(found):
         if pos in seen:
             continue
         seen.add(pos)
@@ -553,6 +578,13 @@ SPECIES_CATEGORIES: dict[str, dict] = {
     "HNO3": {"role": "oxidizer", "field": "oxidizer_type"},
     "O3": {"role": "oxidizer", "field": "oxidizer_type"},
     "FeCl3": {"role": "oxidizer", "field": "oxidizer_type"},
+    "Fe(NO3)3": {"role": "oxidizer", "field": "oxidizer_type"},
+    "KIO4": {"role": "oxidizer", "field": "oxidizer_type"},
+    "KIO3": {"role": "oxidizer", "field": "oxidizer_type"},
+    "NaClO": {"role": "oxidizer", "field": "oxidizer_type"},
+    "K2S2O8": {"role": "oxidizer", "field": "oxidizer_type"},
+    "Na2S2O8": {"role": "oxidizer", "field": "oxidizer_type"},
+    "(NH4)2S2O8": {"role": "oxidizer", "field": "oxidizer_type"},
     "HCl": {"role": "acid", "field": "acid_type"},
     "H2SO4": {"role": "acid", "field": "acid_type"},
     "H₂SO₄": {"role": "acid", "field": "acid_type"},
@@ -562,6 +594,8 @@ SPECIES_CATEGORIES: dict[str, dict] = {
     "hydrofluoric acid": {"role": "acid", "field": "acid_type"},
     "citric acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
     "oxalic acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
+    "malic acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
+    "tartaric acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
     "acetic acid": {"role": "acid", "field": "acid_type"},
     "KOH": {"role": "base", "field": "base_type"},
     "NaOH": {"role": "base", "field": "base_type"},
@@ -598,7 +632,90 @@ SPECIES_CATEGORIES: dict[str, dict] = {
     "glycine": {"role": "chelating_agent", "field": "chelating_agent_type"},
     "BTA": {"role": "inhibitor", "field": "inhibitor_type"},
     "benzotriazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "TTA": {"role": "inhibitor", "field": "inhibitor_type"},
+    "tolyltriazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "TAZ": {"role": "inhibitor", "field": "inhibitor_type"},
+    "1,2,4-triazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "ATA": {"role": "inhibitor", "field": "inhibitor_type"},
+    "3-amino-1,2,4-triazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "5-AT": {"role": "inhibitor", "field": "inhibitor_type"},
+    "5-aminotetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "aminotetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
     "MBI": {"role": "inhibitor", "field": "inhibitor_type"},
+    "2-mercaptobenzimidazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "MBT": {"role": "inhibitor", "field": "inhibitor_type"},
+    "2-mercaptobenzothiazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "MPT": {"role": "inhibitor", "field": "inhibitor_type"},
+    "5-mercapto-1-phenyl-1H-tetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "5-mercapto-1-phenyltetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "BIA": {"role": "inhibitor", "field": "inhibitor_type"},
+    "benzimidazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "imidazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "pyrazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "thiazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "1,3,4-thiadiazole": {"role": "inhibitor", "field": "inhibitor_type"},
+    "adenine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "guanine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "purine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "8-HQ": {"role": "inhibitor", "field": "inhibitor_type"},
+    "8-hydroxyquinoline": {"role": "inhibitor", "field": "inhibitor_type"},
+    "pyridine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "thiourea": {"role": "inhibitor", "field": "inhibitor_type"},
+    "TU": {"role": "inhibitor", "field": "inhibitor_type"},
+    "thiosemicarbazide": {"role": "inhibitor", "field": "inhibitor_type"},
+    "urotropine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "hexamethylenetetramine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "HMTA": {"role": "inhibitor", "field": "inhibitor_type"},
+    "MEA": {"role": "inhibitor", "field": "inhibitor_type"},
+    "monoethanolamine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "cysteine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-cysteine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "methionine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-methionine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "histidine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-histidine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "tryptophan": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-tryptophan": {"role": "inhibitor", "field": "inhibitor_type"},
+    "glutamic acid": {"role": "inhibitor", "field": "inhibitor_type"},
+    "aspartic acid": {"role": "inhibitor", "field": "inhibitor_type"},
+    "alanine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-alanine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "arginine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-arginine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "lysine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "L-lysine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "SDS": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium dodecyl sulfate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "SDBS": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium dodecylbenzenesulfonate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "CTAB": {"role": "inhibitor", "field": "inhibitor_type"},
+    "cetyltrimethylammonium bromide": {"role": "inhibitor", "field": "inhibitor_type"},
+    "DTAB": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Triton X-100": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Tween-80": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Tween 80": {"role": "inhibitor", "field": "inhibitor_type"},
+    "PEG": {"role": "inhibitor", "field": "inhibitor_type"},
+    "polyethylene glycol": {"role": "inhibitor", "field": "inhibitor_type"},
+    "PEI": {"role": "inhibitor", "field": "inhibitor_type"},
+    "polyethyleneimine": {"role": "inhibitor", "field": "inhibitor_type"},
+    "PAA": {"role": "inhibitor", "field": "inhibitor_type"},
+    "polyacrylic acid": {"role": "inhibitor", "field": "inhibitor_type"},
+    "PVP": {"role": "inhibitor", "field": "inhibitor_type"},
+    "polyvinylpyrrolidone": {"role": "inhibitor", "field": "inhibitor_type"},
+    "potassium oleate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium oleate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium benzoate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Na2MoO4": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium molybdate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Na2SiO3": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium silicate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Na2WO4": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium tungstate": {"role": "inhibitor", "field": "inhibitor_type"},
+    "CeCl3": {"role": "inhibitor", "field": "inhibitor_type"},
+    "Ce(NO3)3": {"role": "inhibitor", "field": "inhibitor_type"},
+    "K2Cr2O7": {"role": "inhibitor", "field": "inhibitor_type"},
+    "NaNO2": {"role": "inhibitor", "field": "inhibitor_type"},
+    "sodium nitrite": {"role": "inhibitor", "field": "inhibitor_type"},
     "IPA": {"role": "organic_solvent", "field": "organic_solvent_type"},
     "isopropanol": {"role": "organic_solvent", "field": "organic_solvent_type"},
     "DMSO": {"role": "organic_solvent", "field": "organic_solvent_type"},
@@ -617,6 +734,38 @@ _SPECIES_CANONICAL: dict[str, str] = {
     "ethylene glycol": "EG", "eg": "EG",
     "isopropanol": "IPA", "ipa": "IPA",
     "benzotriazole": "BTA", "bta": "BTA",
+    "tolyltriazole": "TTA", "tta": "TTA",
+    "1,2,4-triazole": "TAZ", "taz": "TAZ",
+    "3-amino-1,2,4-triazole": "ATA", "ata": "ATA",
+    "5-aminotetrazole": "5-AT", "5-at": "5-AT",
+    "2-mercaptobenzimidazole": "MBI", "mbi": "MBI",
+    "2-mercaptobenzothiazole": "MBT", "mbt": "MBT",
+    "5-mercapto-1-phenyl-1h-tetrazole": "MPT",
+    "5-mercapto-1-phenyltetrazole": "MPT", "mpt": "MPT",
+    "benzimidazole": "BIA", "bia": "BIA",
+    "8-hydroxyquinoline": "8-HQ", "8-hq": "8-HQ",
+    "thiourea": "thiourea", "tu": "thiourea",
+    "hexamethylenetetramine": "HMTA", "urotropine": "HMTA", "hmta": "HMTA",
+    "monoethanolamine": "MEA", "mea": "MEA",
+    "l-cysteine": "cysteine", "cysteine": "cysteine",
+    "l-methionine": "methionine", "methionine": "methionine",
+    "l-histidine": "histidine", "histidine": "histidine",
+    "l-tryptophan": "tryptophan", "tryptophan": "tryptophan",
+    "l-alanine": "alanine", "alanine": "alanine",
+    "l-arginine": "arginine", "arginine": "arginine",
+    "l-lysine": "lysine", "lysine": "lysine",
+    "sodium dodecyl sulfate": "SDS", "sds": "SDS",
+    "sodium dodecylbenzenesulfonate": "SDBS", "sdbs": "SDBS",
+    "cetyltrimethylammonium bromide": "CTAB", "ctab": "CTAB",
+    "tween 80": "Tween-80", "tween-80": "Tween-80",
+    "polyethylene glycol": "PEG", "peg": "PEG",
+    "polyethyleneimine": "PEI", "pei": "PEI",
+    "polyacrylic acid": "PAA", "paa": "PAA",
+    "polyvinylpyrrolidone": "PVP", "pvp": "PVP",
+    "sodium molybdate": "Na2MoO4", "na2moo4": "Na2MoO4",
+    "sodium silicate": "Na2SiO3", "na2sio3": "Na2SiO3",
+    "sodium tungstate": "Na2WO4", "na2wo4": "Na2WO4",
+    "sodium nitrite": "NaNO2", "nano2": "NaNO2",
 }
 _SPECIES_CAT_LOWER = {k.lower(): (k, v) for k, v in SPECIES_CATEGORIES.items()}
 
@@ -679,6 +828,11 @@ def extract_electrolytes(text: str) -> list[dict]:
         if _PREP_WASH_NOISE_RE.search(before):
             continue
         conc = m.group("conc").strip()
+        try:
+            if float(conc) <= 0:
+                continue
+        except ValueError:
+            pass
         unit = re.sub(r"\s+", " ", m.group("unit").strip())
         species = normalise_species(m.group("species"))
         counts[(conc, unit, species)] += 1
@@ -754,7 +908,23 @@ def select_environment_for_record(
     ctx_phs = extract_phs(ctx_text) if ctx_text else Counter()
     ctx_temps = extract_temperatures(ctx_text) if ctx_text else Counter()
 
-    chosen_els = ctx_els if ctx_els else paper_electrolytes
+    if ctx_els:
+        # 若該列上下文僅標註緩蝕劑/添加劑（例如表格列 "5 mM TTA"），保留論文主環境的基底酸/鹼/電解質鹽
+        ctx_roles = {(lookup_species_category(e["species"]) or {}).get("role") for e in ctx_els}
+        has_base_medium = bool(ctx_roles & {"acid", "base", "electrolyte_additive"})
+        if not has_base_medium and paper_electrolytes:
+            ctx_species = {e["species"] for e in ctx_els}
+            base_media = [
+                e for e in paper_electrolytes
+                if e["species"] not in ctx_species
+                and (lookup_species_category(e["species"]) or {}).get("role") in {"acid", "base", "electrolyte_additive"}
+            ]
+            # 取出現頻率最高的基底介質補齊
+            chosen_els = ctx_els + base_media[:1]
+        else:
+            chosen_els = ctx_els
+    else:
+        chosen_els = paper_electrolytes
 
     # pH：優先選與電解質酸鹼不矛盾、且出現次數最多的值
     chosen_ph = None

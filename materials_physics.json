@@ -763,8 +763,69 @@
     "WN": {
       "base_element": "W",
       "mp_formula": "WN",
+      "material_name": "Tungsten Nitride",
+      "category": "barrier",
+      "density_g_cm3": 17.7,
+      "molar_mass_g_mol": 197.85,
+      "valence": 6,
+      "equivalent_weight_g_eq": 32.98,
+      "electronegativity_pauling": 2.36,
+      "work_function_eV": 4.6,
+      "standard_potential_V_SHE": 0.05,
+      "melting_point_K": 2473.15,
+      "oxide_type": "WO3",
+      "oxide_stability": "medium",
+      "passivation_tendency": 0.7,
+      "passivation_pH": [
+        0.0,
+        5.0
+      ],
+      "oxide_phase": "WO3/WOxNy(s)",
+      "crystal_structure": "Hexagonal / NaCl-type",
+      "thermal_conductivity_W_mK": 15.0,
+      "electrical_resistivity_ohm_cm": 0.0002,
+      "common_corrosion_products": "WO3, WO4^2-, NH4+",
       "name_aliases": [
-        "tungsten nitride"
+        "tungsten nitride",
+        "ditungsten nitride"
+      ],
+      "aliases": [
+        "tungsten nitride",
+        "w2n"
+      ]
+    },
+    "MoN": {
+      "base_element": "Mo",
+      "mp_formula": "MoN",
+      "material_name": "Molybdenum Nitride",
+      "category": "barrier",
+      "density_g_cm3": 9.46,
+      "molar_mass_g_mol": 109.96,
+      "valence": 4,
+      "equivalent_weight_g_eq": 27.49,
+      "electronegativity_pauling": 2.16,
+      "work_function_eV": 4.7,
+      "standard_potential_V_SHE": 0.05,
+      "melting_point_K": 2023.15,
+      "oxide_type": "MoO2, MoO3",
+      "oxide_stability": "medium",
+      "passivation_tendency": 0.7,
+      "passivation_pH": [
+        0.5,
+        6.0
+      ],
+      "oxide_phase": "MoO2/MoOxNy(s)",
+      "crystal_structure": "Hexagonal / NaCl-type",
+      "thermal_conductivity_W_mK": 17.0,
+      "electrical_resistivity_ohm_cm": 0.0001,
+      "common_corrosion_products": "MoO2, MoO3, MoO4^2-, NH4+",
+      "name_aliases": [
+        "molybdenum nitride",
+        "dimolybdenum nitride"
+      ],
+      "aliases": [
+        "molybdenum nitride",
+        "mo2n"
       ]
     }
   }

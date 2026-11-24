@@ -2,12 +2,13 @@
 一鍵批次執行完整 pipeline（支援多金屬自動切換、斷點續跑、容錯隔離、Step 6 合併與 Step 7 物理特徵強化）
 
 常用指令：
-  .venv/bin/python run_all.py                  # 依 config.METALS_TO_RUN 跑全部金屬 + Step 6 + Step 7
-  .venv/bin/python run_all.py Cu Co W          # 臨時只跑指定金屬 + Step 6 + Step 7
-  .venv/bin/python run_all.py --from-step 5    # 只對所有金屬重跑 Step 5 + Step 6 + Step 7
-  .venv/bin/python run_all.py --from-step 7    # 只重跑 Step 7（Materials Project + Pourbaix 特徵強化）
-  .venv/bin/python run_all.py Cu --force       # 強制重跑 Cu（忽略 Step 1/2 略過設定）
-  .venv/bin/python run_all.py --list           # 查看可用金屬清單與目前 METALS_TO_RUN
+  .venv/bin/python run_all.py                                             # 依 user_settings.METALS_TO_RUN 跑全部金屬 + Step 6 + Step 7
+  .venv/bin/python run_all.py Cu Co W                                     # 臨時只跑指定金屬 + Step 6 + Step 7
+  .venv/bin/python run_all.py Cu Co --search-mode cmp_etch inhibitor --append  # 多選搜尋模式並增量合併
+  .venv/bin/python run_all.py --from-step 5                               # 只對所有金屬重跑 Step 5 + Step 6 + Step 7
+  .venv/bin/python run_all.py --from-step 7                               # 只重跑 Step 7（Materials Project + Pourbaix 特徵強化）
+  .venv/bin/python run_all.py Cu --force                                  # 強制重跑 Cu（忽略 Step 1/2 略過設定）
+  .venv/bin/python run_all.py --list                                      # 查看可用金屬清單與目前 METALS_TO_RUN
 """
 
 import argparse
@@ -17,7 +18,7 @@ import sys
 import time
 
 
-def run_single_metal(from_step: int = 1, force: bool = False) -> None:
+def run_single_metal(from_step: int = 1, force: bool = False, append: bool = False) -> None:
     """在獨立子進程中執行單一金屬的 Step from_step ~ Step 5。"""
     import step1_search_openalex
     import step2_find_pdf_urls
@@ -38,19 +39,19 @@ def run_single_metal(from_step: int = 1, force: bool = False) -> None:
         print("=" * 60)
         print(f"[{METAL_SYMBOL}] Step 1: Search OpenAlex")
         print("=" * 60)
-        if not force and SKIP_EXISTING_STEP1 and os.path.exists(STEP1_OUTPUT):
+        if not force and not append and SKIP_EXISTING_STEP1 and os.path.exists(STEP1_OUTPUT):
             print(f"⏭️  已存在 Step 1 輸出，略過：{STEP1_OUTPUT}")
         else:
-            step1_search_openalex.run_search()
+            step1_search_openalex.run_search(append=append)
 
     if from_step <= 2:
         print("\n" + "=" * 60)
         print(f"[{METAL_SYMBOL}] Step 2: Find PDF URLs via Unpaywall")
         print("=" * 60)
-        if not force and SKIP_EXISTING_STEP2 and os.path.exists(STEP2_OUTPUT):
+        if not force and not append and SKIP_EXISTING_STEP2 and os.path.exists(STEP2_OUTPUT):
             print(f"⏭️  已存在 Step 2 輸出，略過：{STEP2_OUTPUT}")
         else:
-            step2_find_pdf_urls.run_find_pdfs()
+            step2_find_pdf_urls.run_find_pdfs(append=append)
 
     if from_step <= 3:
         print("\n" + "=" * 60)
@@ -85,6 +86,8 @@ def run_batch(
     metals: list[str],
     from_step: int = 1,
     force: bool = False,
+    append: bool = False,
+    search_modes: list[str] | None = None,
     no_merge: bool = False,
     no_enrich: bool = False,
 ) -> int:
@@ -97,9 +100,11 @@ def run_batch(
     print(f"  TAFEL MINING BATCH PIPELINE")
     print(f"  Metals ({len(metals)}): {', '.join(metals)}")
     print(
-        f"  From step : {from_step}  |  Force rerun: {force}  |  "
+        f"  From step : {from_step}  |  Force: {force}  |  Append: {append}  |  "
         f"Merge: {not no_merge}  |  Enrich: {not no_enrich}"
     )
+    if search_modes:
+        print(f"  Search modes override: {', '.join(search_modes)}")
     print("=" * 65)
 
     summary: list[tuple[str, str, float]] = []
@@ -113,6 +118,10 @@ def run_batch(
 
             env = os.environ.copy()
             env["TAFEL_METAL"] = metal
+            if search_modes:
+                env["TAFEL_SEARCH_MODES"] = ",".join(search_modes)
+            if append:
+                env["TAFEL_APPEND"] = "1"
             env.pop("TAFEL_QUIET_CONFIG", None)
 
             cmd = [
@@ -123,8 +132,12 @@ def run_batch(
                 "--from-step",
                 str(from_step),
             ]
+            if search_modes:
+                cmd.extend(["--search-mode", *search_modes])
             if force:
                 cmd.append("--force")
+            if append:
+                cmd.append("--append")
 
             proc = subprocess.run(cmd, env=env)
             elapsed = time.time() - t0
@@ -176,14 +189,14 @@ def run_batch(
     return 0 if (ok_count == len(summary) and merge_ok and enrich_ok) else 1
 
 
-def main():
+def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Tafel Mining 多金屬批次執行器（Step 1~5 + Step 6 合併）"
+        description="Tafel Mining 多金屬批次執行器（Step 1~5 + Step 6 合併 + Step 7 強化）"
     )
     parser.add_argument(
         "metals",
         nargs="*",
-        help="要執行的金屬符號（省略則使用 config.METALS_TO_RUN），例如：Cu Co W",
+        help="要執行的金屬符號（省略則使用 user_settings.METALS_TO_RUN），例如：Cu Co W",
     )
     parser.add_argument(
         "--from-step",
@@ -195,7 +208,22 @@ def main():
     parser.add_argument(
         "--force",
         action="store_true",
-        help="強制重跑 Step 1 與 Step 2（忽略 config.SKIP_EXISTING_STEP1/2）",
+        help="強制重跑 Step 1 與 Step 2（忽略 user_settings.SKIP_EXISTING_STEP1/2 並覆寫）",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="增量補抓模式：執行 Step 1/2 並與既有 CSV 依 DOI 合併去重（適合搭配 --search-mode 補抓舊金屬）",
+    )
+    parser.add_argument(
+        "--search-mode",
+        nargs="+",
+        metavar="MODE",
+        default=None,
+        help=(
+            "臨時指定一或多種搜尋模式（可多選組合：corrosion, cmp_etch, inhibitor, catalysis, all），"
+            "例如：--search-mode cmp_etch inhibitor"
+        ),
     )
     parser.add_argument(
         "--no-merge",
@@ -221,12 +249,59 @@ def main():
         "--single-metal",
         help=argparse.SUPPRESS,
     )
+    return parser
+
+
+def resolve_cli_metals_and_modes(
+    raw_metals: list[str] | None,
+    raw_modes: list[str] | None,
+    config_module,
+) -> tuple[list[str], list[str] | None]:
+    """
+    解析命令列傳入的 metals 與 --search-mode（nargs="+"）：
+    支援 `Cu Co --search-mode cmp_etch inhibitor` 與 `--search-mode cmp_etch inhibitor Cu Co` 兩種順序。
+    """
+    metals_out = list(raw_metals or [])
+    if not raw_modes:
+        return metals_out, None
+
+    valid_mode_tokens = {*config_module.VALID_SEARCH_MODES, "all", "corrosion_cmp"}
+    metal_lookup = {k.lower() for k in config_module.METAL_PRESETS}
+
+    # 展開可能含逗號的 token，但若尾端接著金屬符號（當使用者把 --search-mode 寫在金屬前面時）自動歸還給 metals
+    flat_tokens: list[str] = []
+    for item in raw_modes:
+        flat_tokens.extend(t for t in str(item).strip().split(",") if t)
+
+    split_idx = len(flat_tokens)
+    for i, tok in enumerate(flat_tokens):
+        if tok.lower() not in valid_mode_tokens:
+            split_idx = i
+            break
+
+    leading_modes = flat_tokens[:split_idx]
+    trailing = flat_tokens[split_idx:]
+    if leading_modes and trailing and all(t.lower() in metal_lookup for t in trailing):
+        metals_out.extend(trailing)
+        resolved_modes = config_module.parse_search_modes(leading_modes)
+    else:
+        resolved_modes = config_module.parse_search_modes(flat_tokens)
+
+    return metals_out, resolved_modes
+
+
+def main():
+    parser = build_cli_parser()
     args = parser.parse_args()
 
     # 內部子進程模式：直接執行單一金屬
     if args.single_metal:
         os.environ["TAFEL_METAL"] = args.single_metal
-        run_single_metal(from_step=args.from_step, force=args.force)
+        if args.search_mode:
+            os.environ["TAFEL_SEARCH_MODES"] = ",".join(args.search_mode)
+        if args.append:
+            os.environ["TAFEL_APPEND"] = "1"
+        run_single_metal(from_step=args.from_step, force=args.force, append=args.append)
         return
 
     # 靜默讀取 config（避免協調器印出重複的預設金屬 banner 或建多餘資料夾）
@@ -256,12 +331,19 @@ def main():
         for sym, info in config.METAL_PRESETS.items():
             mark = "✓" if sym in config.METALS_TO_RUN else " "
             print(f"  [{mark}] {sym:<4s}  {info['target_metal']:<18s}  ({len(info['compounds'])} compounds)")
-        print(f"\nCurrent METALS_TO_RUN: {config.METALS_TO_RUN}")
+        print(f"\nCurrent METALS_TO_RUN : {config.METALS_TO_RUN}")
+        print(f"Default SEARCH_MODES  : {config.SEARCH_MODES} (available: {list(config.VALID_SEARCH_MODES)})")
         return
 
-    raw_metals = args.metals if args.metals else config.METALS_TO_RUN
+    try:
+        cli_metals, resolved_modes = resolve_cli_metals_and_modes(args.metals, args.search_mode, config)
+    except ValueError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
+
+    raw_metals = cli_metals if cli_metals else config.METALS_TO_RUN
     if not raw_metals:
-        print("❌ 沒有指定任何金屬，請在 config.py 設定 METALS_TO_RUN 或於命令列傳入金屬符號。")
+        print("❌ 沒有指定任何金屬，請在 user_settings.py 設定 METALS_TO_RUN 或於命令列傳入金屬符號。")
         sys.exit(1)
 
     try:
@@ -276,6 +358,8 @@ def main():
         metals=metals_unique,
         from_step=args.from_step,
         force=args.force,
+        append=args.append,
+        search_modes=resolved_modes,
         no_merge=args.no_merge,
         no_enrich=args.no_enrich,
     )

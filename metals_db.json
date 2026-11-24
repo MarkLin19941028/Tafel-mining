@@ -35,6 +35,13 @@
         "\"copper\" \"glycine\" \"H2O2\" \"potentiodynamic\"",
         "\"copper\" \"BTA\" \"slurry\" \"Ecorr\"",
         "\"copper\" \"wet etching\" \"H2O2\" \"polarization\""
+      ],
+      "inhibitor_queries": [
+        "\"copper\" \"tolyltriazole\" \"potentiodynamic\"",
+        "\"copper\" \"1,2,4-triazole\" \"polarization\"",
+        "\"copper\" \"5-aminotetrazole\" \"polarization\"",
+        "\"copper\" \"2-mercaptobenzothiazole\" \"polarization\"",
+        "\"copper\" \"2-mercaptobenzimidazole\" \"polarization\""
       ]
     },
     "Co": {
@@ -74,6 +81,12 @@
         "\"cobalt\" \"BTA\" \"potentiodynamic\" \"CMP\"",
         "\"cobalt\" \"galvanic corrosion\" \"copper\" \"CMP\"",
         "\"cobalt\" \"wet etching\" \"potentiodynamic\""
+      ],
+      "inhibitor_queries": [
+        "\"cobalt\" \"1,2,4-triazole\" \"polarization\"",
+        "\"cobalt\" \"5-aminotetrazole\" \"polarization\"",
+        "\"cobalt\" \"potassium oleate\" \"CMP\"",
+        "\"cobalt\" \"corrosion inhibitor\" \"CMP\""
       ]
     },
     "W": {
@@ -90,8 +103,6 @@
         "WO3",
         "WO2",
         "WP",
-        "WN",
-        "W2N",
         "NiW",
         "CoW",
         "MoW",
@@ -99,7 +110,6 @@
         "tungsten disulfide",
         "tungsten oxide",
         "tungsten phosphide",
-        "tungsten nitride",
         "tungsten thin film"
       ],
       "cmp_queries": [
@@ -110,6 +120,12 @@
         "\"tungsten\" \"KIO3\" \"potentiodynamic\"",
         "\"tungsten\" \"slurry\" \"corrosion current\"",
         "\"tungsten\" \"wet etching\" \"H2O2\" \"polarization\""
+      ],
+      "inhibitor_queries": [
+        "\"tungsten\" \"CTAB\" \"CMP\" \"polarization\"",
+        "\"tungsten\" \"polyethyleneimine\" \"CMP\"",
+        "\"tungsten\" \"imidazole\" \"CMP\" \"polarization\"",
+        "\"tungsten\" \"corrosion inhibitor\" \"CMP\""
       ]
     },
     "Ru": {
@@ -146,6 +162,12 @@
         "\"ruthenium\" \"persulfate\" \"polarization\"",
         "\"ruthenium\" \"wet etching\" \"potentiodynamic\"",
         "\"ruthenium\" \"galvanic corrosion\" \"copper\" \"CMP\""
+      ],
+      "inhibitor_queries": [
+        "\"ruthenium\" \"BTA\" \"potentiodynamic\"",
+        "\"ruthenium\" \"1,2,4-triazole\" \"CMP\"",
+        "\"ruthenium\" \"3-amino-1,2,4-triazole\" \"polarization\"",
+        "\"ruthenium\" \"corrosion inhibitor\" \"CMP\""
       ]
     },
     "Ti": {
@@ -183,6 +205,10 @@
         "\"titanium\" \"H2O2\" \"potentiodynamic polarization\"",
         "\"titanium\" \"HF\" \"wet etching\" \"polarization\"",
         "\"titanium\" \"slurry\" \"corrosion current\""
+      ],
+      "inhibitor_queries": [
+        "\"titanium\" \"corrosion inhibitor\" \"HF\" \"polarization\"",
+        "\"titanium\" \"molybdate\" \"potentiodynamic\""
       ]
     },
     "TiN": {
@@ -223,6 +249,10 @@
         "\"TiN\" \"NH4OH\" \"H2O2\" \"corrosion\"",
         "\"titanium nitride\" \"oxidizer\" \"Tafel\"",
         "\"TiN\" \"slurry\" \"corrosion current\" \"Ecorr\""
+      ],
+      "inhibitor_queries": [
+        "\"titanium nitride\" \"inhibitor\" \"polarization\"",
+        "\"TiN\" \"corrosion inhibitor\" \"H2O2\""
       ]
     },
     "TaN": {
@@ -261,6 +291,110 @@
         "\"TaN\" \"H2O2\" \"potentiodynamic polarization\"",
         "\"TaN\" \"slurry\" \"Tafel\" corrosion",
         "\"TaN\" \"galvanic corrosion\" \"copper\" \"CMP\""
+      ],
+      "inhibitor_queries": [
+        "\"tantalum nitride\" \"inhibitor\" \"polarization\"",
+        "\"TaN\" \"BTA\" \"CMP\""
+      ]
+    },
+    "WN": {
+      "target_metal": "tungsten nitride",
+      "ecorr_valid_range_v_she": [
+        -0.9,
+        1.0
+      ],
+      "compounds": [
+        "WN",
+        "W2N",
+        "WNx",
+        "WN thin film",
+        "WN coating",
+        "WN barrier",
+        "WN electrode",
+        "W2N thin film",
+        "W2N barrier",
+        "WN/Si",
+        "WN/Cu",
+        "WN/W",
+        "tungsten nitride film",
+        "tungsten nitride coating",
+        "tungsten nitride barrier",
+        "tungsten nitride electrode",
+        "reactive sputtering WN",
+        "PVD WN",
+        "CVD WN",
+        "ALD WN",
+        "PEALD WN",
+        "WSiN",
+        "WTiN",
+        "WCN"
+      ],
+      "cmp_queries": [
+        "\"tungsten nitride\" \"CMP\" \"potentiodynamic\"",
+        "\"WN\" \"barrier\" \"CMP\" \"potentiodynamic\"",
+        "\"W2N\" \"CMP\" \"potentiodynamic\"",
+        "\"WN\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"tungsten nitride\" \"wet etching\" \"H2O2\"",
+        "\"WN\" \"NH4OH\" \"H2O2\" \"corrosion\"",
+        "\"WN\" \"Fe(NO3)3\" \"polarization\"",
+        "\"WN\" \"galvanic corrosion\" \"copper\" \"CMP\"",
+        "\"WN\" \"slurry\" \"Tafel\" corrosion"
+      ],
+      "inhibitor_queries": [
+        "\"tungsten nitride\" \"inhibitor\" \"polarization\"",
+        "\"WN\" \"corrosion inhibitor\" \"CMP\""
+      ]
+    },
+    "MoN": {
+      "target_metal": "molybdenum nitride",
+      "ecorr_valid_range_v_she": [
+        -0.9,
+        1.0
+      ],
+      "compounds": [
+        "MoN",
+        "Mo2N",
+        "MoNx",
+        "gamma-Mo2N",
+        "γ-Mo2N",
+        "δ-MoN",
+        "MoN thin film",
+        "MoN coating",
+        "Mo2N coating",
+        "Mo2N thin film",
+        "MoN electrode",
+        "MoN barrier",
+        "MoN/Si",
+        "MoN/Ti",
+        "MoN/steel",
+        "molybdenum nitride film",
+        "molybdenum nitride coating",
+        "molybdenum nitride barrier",
+        "molybdenum nitride electrode",
+        "reactive sputtering MoN",
+        "PVD MoN",
+        "CVD MoN",
+        "ALD MoN",
+        "CrMoN",
+        "TiMoN",
+        "MoSiN",
+        "MoAlN",
+        "MoCN"
+      ],
+      "cmp_queries": [
+        "\"molybdenum nitride\" \"CMP\" \"potentiodynamic\"",
+        "\"MoN\" \"CMP\" \"potentiodynamic polarization\"",
+        "\"MoN\" \"H2O2\" \"potentiodynamic polarization\"",
+        "\"molybdenum nitride\" \"wet etching\" \"polarization\"",
+        "\"MoN\" \"NH4OH\" \"H2O2\" \"corrosion\"",
+        "\"Mo2N\" \"potentiodynamic polarization\" corrosion",
+        "\"MoN coating\" \"potentiodynamic polarization\" \"NaCl\"",
+        "\"molybdenum nitride\" \"NaCl\" \"Tafel\" corrosion",
+        "\"molybdenum nitride\" \"H2SO4\" \"potentiodynamic\""
+      ],
+      "inhibitor_queries": [
+        "\"molybdenum nitride\" \"inhibitor\" \"polarization\"",
+        "\"MoN\" \"corrosion inhibitor\""
       ]
     },
     "Al": {
@@ -299,6 +433,11 @@
         "\"aluminum\" \"CMP\" \"potentiodynamic polarization\"",
         "\"aluminum\" \"wet etching\" \"potentiodynamic\"",
         "\"aluminum\" \"H2O2\" \"slurry\" \"Tafel\""
+      ],
+      "inhibitor_queries": [
+        "\"aluminum\" \"8-hydroxyquinoline\" \"potentiodynamic\"",
+        "\"aluminum\" \"cerium\" \"corrosion inhibitor\" \"polarization\"",
+        "\"aluminum\" \"molybdate\" \"corrosion\" \"polarization\""
       ]
     },
     "Ta": {
@@ -335,6 +474,10 @@
         "\"tantalum\" \"CMP\" \"potentiodynamic polarization\"",
         "\"tantalum\" \"H2O2\" \"slurry\" \"Tafel\"",
         "\"tantalum\" \"barrier\" \"galvanic corrosion\" \"CMP\""
+      ],
+      "inhibitor_queries": [
+        "\"tantalum\" \"BTA\" \"CMP\" \"polarization\"",
+        "\"tantalum\" \"corrosion inhibitor\" \"polarization\""
       ]
     },
     "Mn": {
@@ -371,6 +514,9 @@
       "cmp_queries": [
         "\"manganese\" \"CMP\" \"potentiodynamic\"",
         "\"manganese\" \"H2O2\" \"potentiodynamic polarization\""
+      ],
+      "inhibitor_queries": [
+        "\"manganese\" \"corrosion inhibitor\" \"polarization\""
       ]
     },
     "Mo": {
@@ -387,9 +533,7 @@
         "MoO3",
         "Mo2C",
         "MoC",
-        "MoN",
         "MoP",
-        "Mo2N",
         "NiMo",
         "CoMo",
         "FeMo",
@@ -399,7 +543,6 @@
         "molybdenum carbide",
         "molybdenum phosphide",
         "molybdenum oxide",
-        "molybdenum nitride",
         "MoS2 nanosheet",
         "MoS2 edge"
       ],
@@ -408,6 +551,11 @@
         "\"molybdenum\" \"H2O2\" \"potentiodynamic polarization\"",
         "\"molybdenum\" \"wet etching\" \"Tafel\"",
         "\"molybdenum\" \"slurry\" \"corrosion current\""
+      ],
+      "inhibitor_queries": [
+        "\"molybdenum\" \"BTA\" \"potentiodynamic\"",
+        "\"molybdenum\" \"imidazole\" \"CMP\" \"polarization\"",
+        "\"molybdenum\" \"corrosion inhibitor\" \"CMP\""
       ]
     }
   }

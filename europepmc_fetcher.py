@@ -19,14 +19,55 @@ from config import (
     METAL_SYMBOL,
     REQUEST_TIMEOUT,
     REQUIRE_TARGET_IN_TITLE_ABSTRACT,
-    SEARCH_MODE,
+    SEARCH_MODES,
     TARGET_METAL,
     TEXT_DIR,
     build_target_regex,
+    parse_search_modes,
 )
 
 EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EPMC_XML_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+
+_EPMC_MODE_CLAUSES: dict[str, str] = {
+    "corrosion": (
+        '("potentiodynamic polarization" OR "corrosion current density" '
+        'OR "Tafel extrapolation" OR ("Ecorr" AND "icorr"))'
+    ),
+    "cmp_etch": (
+        '(("chemical mechanical" OR "CMP" OR "wet etching" OR "slurry" OR "H2O2") '
+        'AND ("potentiodynamic" OR "Tafel" OR "corrosion current" OR "Ecorr"))'
+    ),
+    "inhibitor": (
+        '(("corrosion inhibitor" OR "corrosion inhibition" OR "inhibition efficiency" OR "organic inhibitor") '
+        'AND ("Tafel" OR "potentiodynamic" OR "polarization" OR "icorr" OR "Ecorr"))'
+    ),
+    "catalysis": (
+        '(("Tafel slope" OR "exchange current density" OR "linear sweep voltammetry") '
+        'AND ("hydrogen evolution" OR "oxygen evolution" OR "oxygen reduction" OR "CO2 reduction" OR "electrocatalyst"))'
+    ),
+}
+
+
+def build_europepmc_query(
+    modes: list[str] | tuple[str, ...] | str | None = None,
+    target_metal: str | None = None,
+    metal_symbol: str | None = None,
+    from_year: int | None = None,
+) -> str:
+    """依選取的搜尋模式組合組裝 Europe PMC 布林查詢字串。"""
+    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
+    t_metal = target_metal or TARGET_METAL
+    m_sym = metal_symbol or METAL_SYMBOL
+    f_year = FROM_YEAR if from_year is None else from_year
+
+    clauses = [_EPMC_MODE_CLAUSES[m] for m in active_modes]
+    topic_clause = clauses[0] if len(clauses) == 1 else f"({' OR '.join(clauses)})"
+    return (
+        f'("{t_metal}" OR "{m_sym}") '
+        f"AND {topic_clause} "
+        f"AND OPEN_ACCESS:y AND PUB_YEAR:[{f_year} TO 2100]"
+    )
 
 
 def sanitize_base_name(identifier: str) -> str:
@@ -211,29 +252,8 @@ def run_europepmc_search(
     if limit <= 0:
         return {"new_txt": 0, "upgraded_tables": 0, "skipped": 0, "failed": 0}
 
-    if SEARCH_MODE == "cmp_etch":
-        topic_clause = (
-            '("chemical mechanical" OR "CMP" OR "wet etching" OR "slurry" OR "H2O2") '
-            'AND ("potentiodynamic" OR "Tafel" OR "corrosion current" OR "Ecorr")'
-        )
-    elif SEARCH_MODE in ("corrosion_cmp", "all"):
-        topic_clause = (
-            '("potentiodynamic polarization" OR "corrosion current density" '
-            'OR "Tafel extrapolation" OR ("Ecorr" AND "icorr") '
-            'OR (("CMP" OR "chemical mechanical" OR "wet etching") AND ("Tafel" OR "potentiodynamic")))'
-        )
-    else:
-        topic_clause = (
-            '("potentiodynamic polarization" OR "corrosion current density" '
-            'OR "Tafel extrapolation" OR ("Ecorr" AND "icorr"))'
-        )
-
-    query = (
-        f'("{TARGET_METAL}" OR "{METAL_SYMBOL}") '
-        f"AND {topic_clause} "
-        f"AND OPEN_ACCESS:y AND PUB_YEAR:[{FROM_YEAR} TO 2100]"
-    )
-    print(f"\n[Europe PMC] Searching open-access corrosion papers (limit={limit})...")
+    query = build_europepmc_query()
+    print(f"\n[Europe PMC] Searching open-access papers (modes={','.join(SEARCH_MODES)}, limit={limit})...")
     print(f"  Query: {query}")
 
     target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
