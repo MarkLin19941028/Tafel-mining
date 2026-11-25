@@ -425,6 +425,478 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
         self.assertEqual(m2, ["Cu", "Co"])
         self.assertEqual(modes2, ["cmp_etch", "inhibitor"])
 
+        a3 = parser.parse_args(["Cu", "--from-step", "2", "--to-step", "3", "--retry-failed"])
+        self.assertEqual(a3.from_step, 2)
+        self.assertEqual(a3.to_step, 3)
+        self.assertTrue(a3.retry_failed)
+
+
+class TestUnifiedDedupAndDownloadState(unittest.TestCase):
+    def test_step1_three_source_merge_and_append_with_pmcid(self):
+        from step1_search_openalex import _merge_sources, _merge_with_existing_step1
+
+        oa = pd.DataFrame([
+            {
+                "doi": "https://doi.org/10.1000/shared",
+                "pmcid": None,
+                "source_api": "openalex",
+                "title": "Shared Cu paper",
+                "best_pdf_url": None,
+                "abstract": "",
+            },
+        ])
+        s2 = pd.DataFrame([
+            {
+                "doi": "10.1000/SHARED",
+                "s2_paper_id": "s2_1",
+                "pmcid": None,
+                "source_api": "semantic_scholar",
+                "title": "Shared Cu paper",
+                "best_pdf_url": "https://example.org/shared.pdf",
+                "abstract": "From S2",
+            },
+        ])
+        epmc = pd.DataFrame([
+            {
+                "doi": "https://doi.org/10.1000/shared",
+                "pmcid": "PMC12345",
+                "source_api": "europepmc",
+                "title": "Shared Cu paper",
+                "best_pdf_url": None,
+                "abstract": "From EPMC",
+            },
+            {
+                "doi": None,
+                "pmcid": "PMC99999",
+                "source_api": "europepmc",
+                "title": "PMCID only Cu paper",
+                "best_pdf_url": None,
+                "abstract": "Copper polarization",
+            },
+        ])
+
+        merged = _merge_sources(oa, s2, epmc)
+        self.assertEqual(len(merged), 2)
+        shared_row = merged.iloc[0]
+        self.assertEqual(shared_row["pmcid"], "PMC12345")
+        self.assertEqual(shared_row["best_pdf_url"], "https://example.org/shared.pdf")
+        self.assertIn("openalex", shared_row["source_api"])
+        self.assertIn("semantic_scholar", shared_row["source_api"])
+        self.assertIn("europepmc", shared_row["source_api"])
+        self.assertEqual(merged.iloc[1]["pmcid"], "PMC99999")
+
+        # Append mode should deduplicate PMCID-only records and backfill pmcid on existing DOI
+        ex = pd.DataFrame([
+            {"doi": "https://doi.org/10.1000/shared", "pmcid": None, "best_pdf_url": None, "abstract": ""},
+            {"doi": None, "pmcid": "PMC99999", "best_pdf_url": None, "abstract": "Old"},
+        ])
+        appended = _merge_with_existing_step1(ex, merged)
+        self.assertEqual(len(appended), 2)
+        self.assertEqual(appended.iloc[0]["pmcid"], "PMC12345")
+
+    def test_step3_offline_bootstrap_and_retry_failed_queue(self):
+        import tempfile
+        import step3_download_pdfs as s3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = os.path.join(tmpdir, "pdfs")
+            text_dir = os.path.join(tmpdir, "texts")
+            state_path = os.path.join(tmpdir, "cu_download_state.json")
+            os.makedirs(pdf_dir)
+            os.makedirs(text_dir)
+
+            # Simulate an already-downloaded PDF for doi_done
+            done_base = s3.sanitize_base_name("10.1000/done")
+            with open(os.path.join(pdf_dir, done_base + ".pdf"), "wb") as f:
+                f.write(b"%PDF-1.4 dummy")
+
+            df_old = pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/done", "final_pdf_url": "https://ex.org/done.pdf", "pmcid": None},
+                {"doi": "https://doi.org/10.1000/fail", "final_pdf_url": "https://ex.org/fail1.pdf", "pmcid": None},
+            ])
+            state = s3.load_or_bootstrap_download_state(state_path, df_old, pdf_dir, text_dir)
+            self.assertEqual(state["10.1000/done"]["status"], "done_pdf")
+            self.assertEqual(state["10.1000/fail"]["status"], "failed_legacy")
+
+            # After --append adds a brand-new paper and a new PMCID paper, only new ones enter queue
+            df_new = pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/done", "final_pdf_url": "https://ex.org/done.pdf", "pmcid": None},
+                {"doi": "https://doi.org/10.1000/fail", "final_pdf_url": "https://ex.org/fail1.pdf", "pmcid": None},
+                {"doi": "https://doi.org/10.1000/brandnew", "final_pdf_url": "https://ex.org/new.pdf", "pmcid": None},
+                {"doi": None, "final_pdf_url": None, "pmcid": "PMC77777"},
+            ])
+            pending, stats = s3.select_pending_rows(df_new, state, pdf_dir, text_dir, retry_failed=False)
+            self.assertEqual([p["key"] for p in pending], ["10.1000/brandnew", "pmcid:pmc77777"])
+            self.assertEqual(stats["skipped_done"], 1)
+            self.assertEqual(stats["skipped_failed"], 1)
+
+            # If old failed paper gets a new URL, it is automatically queued even without --retry-failed
+            df_new_url = pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/fail", "final_pdf_url": "https://ex.org/fail2_new.pdf", "pmcid": None},
+            ])
+            pending_u, stats_u = s3.select_pending_rows(df_new_url, state, pdf_dir, text_dir, retry_failed=False)
+            self.assertEqual([p["key"] for p in pending_u], ["10.1000/fail"])
+            self.assertEqual(stats_u["retry_new_source"], 1)
+
+            # With --retry-failed, old failed paper is queued even with the same URL
+            pending_r, stats_r = s3.select_pending_rows(df_old, state, pdf_dir, text_dir, retry_failed=True)
+            self.assertEqual([p["key"] for p in pending_r], ["10.1000/fail"])
+            self.assertEqual(stats_r["retry_forced"], 1)
+
+    def test_step3_fresh_metal_bootstrap_keeps_all_pending(self):
+        import tempfile
+        import step3_download_pdfs as s3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = os.path.join(tmpdir, "pdfs")
+            text_dir = os.path.join(tmpdir, "texts")
+            state_path = os.path.join(tmpdir, "al_download_state.json")
+            os.makedirs(pdf_dir)
+            os.makedirs(text_dir)
+
+            df_fresh = pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/al1", "final_pdf_url": "https://ex.org/al1.pdf", "pmcid": None},
+            ])
+            state = s3.load_or_bootstrap_download_state(state_path, df_fresh, pdf_dir, text_dir)
+            self.assertNotIn("10.1000/al1", state)
+            pending, _ = s3.select_pending_rows(df_fresh, state, pdf_dir, text_dir, retry_failed=False)
+            self.assertEqual([p["key"] for p in pending], ["10.1000/al1"])
+
+    def test_first_append_on_legacy_metal_does_not_mark_new_papers_failed(self):
+        import tempfile
+        import step2_find_pdf_urls as s2
+        import step3_download_pdfs as s3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = os.path.join(tmpdir, "pdfs")
+            text_dir = os.path.join(tmpdir, "texts")
+            state_path = os.path.join(tmpdir, "cu_download_state.json")
+            os.makedirs(pdf_dir)
+            os.makedirs(text_dir)
+
+            # Existing metal has 1 downloaded PDF and 1 old failed DOI, and NO download_state.json yet
+            done_base = s3.sanitize_base_name("10.1000/old_done")
+            with open(os.path.join(pdf_dir, done_base + ".pdf"), "wb") as f:
+                f.write(b"%PDF-1.4 dummy")
+
+            prev_step2_df = pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/old_done", "final_pdf_url": "https://ex.org/done.pdf", "pmcid": None},
+                {"doi": "https://doi.org/10.1000/old_fail", "final_pdf_url": "https://ex.org/fail.pdf", "pmcid": None},
+            ])
+
+            # Step 2 --append bootstraps state from OLD Step 2 CSV BEFORE writing merged CSV
+            s2._bootstrap_state_from_prev_step2(
+                prev_step2_df, state_path=state_path, pdf_dir=pdf_dir, text_dir=text_dir
+            )
+
+            # Then Step 3 runs on the merged CSV (which now includes a newly appended PDF paper)
+            merged_step2_df = pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/old_done", "final_pdf_url": "https://ex.org/done.pdf", "pmcid": None},
+                {"doi": "https://doi.org/10.1000/old_fail", "final_pdf_url": "https://ex.org/fail.pdf", "pmcid": None},
+                {"doi": "https://doi.org/10.1000/newly_appended", "final_pdf_url": "https://ex.org/new.pdf", "pmcid": None},
+            ])
+            state = s3.load_or_bootstrap_download_state(state_path, merged_step2_df, pdf_dir, text_dir)
+            pending, stats = s3.select_pending_rows(merged_step2_df, state, pdf_dir, text_dir, retry_failed=False)
+
+            self.assertEqual(state["10.1000/old_fail"]["status"], s3.STATUS_FAILED_LEGACY)
+            self.assertNotIn("10.1000/newly_appended", state)
+            self.assertEqual([p["key"] for p in pending], ["10.1000/newly_appended"])
+            self.assertEqual(stats["skipped_done"], 1)
+            self.assertEqual(stats["skipped_failed"], 1)
+
+
+class TestStep1InflightDedup(unittest.TestCase):
+    def test_openalex_inflight_dedup_backfill_and_early_stop(self):
+        from unittest.mock import MagicMock, patch
+        import step1_search_openalex as s1
+
+        def _oa_item(oid, doi, pdf_url=None, abstract_words=None):
+            inv = {w: [i] for i, w in enumerate(abstract_words)} if abstract_words else None
+            return {
+                "id": oid,
+                "doi": doi,
+                "title": f"Title {oid}",
+                "publication_year": 2024,
+                "primary_location": {"source": {"display_name": "J. Electrochem."}, "pdf_url": None},
+                "best_oa_location": {"pdf_url": pdf_url},
+                "open_access": {"is_oa": bool(pdf_url), "oa_status": "gold" if pdf_url else "closed", "oa_url": pdf_url},
+                "abstract_inverted_index": inv,
+                "cited_by_count": 10,
+                "authorships": [{"author": {"display_name": "Alice"}}],
+            }
+
+        # Page 1: 1 no-DOI item (ignored), 1 existing complete DOI (skipped), 1 existing incomplete DOI (backfilled)
+        # Page 2: 2 brand-new DOIs -> satisfies max_records=2
+        pages = [
+            {
+                "results": [
+                    _oa_item("W0", None),
+                    _oa_item("W1", "https://doi.org/10.1000/old_full", "https://ex.org/old.pdf", ["Old"]),
+                    _oa_item("W2", "https://doi.org/10.1000/old_need_pdf", "https://ex.org/filled.pdf", ["Filled"]),
+                ],
+                "meta": {"next_cursor": "c2"},
+            },
+            {
+                "results": [
+                    _oa_item("W3", "https://doi.org/10.1000/new1", "https://ex.org/n1.pdf", ["New1"]),
+                    _oa_item("W4", "https://doi.org/10.1000/new2", None, None),
+                ],
+                "meta": {"next_cursor": "c3"},
+            },
+        ]
+        mock_resps = []
+        for p in pages:
+            r = MagicMock()
+            r.json.return_value = p
+            mock_resps.append(r)
+
+        known = {"10.1000/old_full", "10.1000/old_need_pdf"}
+        needs_backfill = {"10.1000/old_need_pdf": {"best_pdf_url", "abstract"}}
+
+        with patch.object(s1, "request_with_retry", side_effect=mock_resps) as mock_req, \
+             patch.object(s1.time, "sleep"):
+            recs = s1.fetch_single_query(
+                '"copper" "Tafel"',
+                max_records=2,
+                known_keys=known,
+                needs_backfill=needs_backfill,
+                max_scan_multiplier=3,
+                early_stop_empty_pages=2,
+            )
+
+        self.assertEqual(mock_req.call_count, 2)
+        dois = [r["doi"] for r in recs]
+        # Backfilled old DOI + 2 new DOIs
+        self.assertEqual(dois, [
+            "https://doi.org/10.1000/old_need_pdf",
+            "https://doi.org/10.1000/new1",
+            "https://doi.org/10.1000/new2",
+        ])
+        # New keys added to known_keys; backfilled key cleared from needs_backfill
+        self.assertIn("10.1000/new1", known)
+        self.assertIn("10.1000/new2", known)
+        self.assertNotIn("10.1000/old_need_pdf", needs_backfill)
+        # New paper missing pdf/abstract is registered for downstream S2/EPMC backfill
+        self.assertIn("best_pdf_url", needs_backfill["10.1000/new2"])
+        self.assertIn("pmcid", needs_backfill["10.1000/new2"])
+
+        # Test early-stop after 2 consecutive all-duplicate pages (does not scan page 3)
+        dup_pages = [
+            {"results": [_oa_item("W1", "https://doi.org/10.1000/old_full")], "meta": {"next_cursor": f"c{i+2}"}}
+            for i in range(5)
+        ]
+        dup_resps = []
+        for p in dup_pages:
+            r = MagicMock()
+            r.json.return_value = p
+            dup_resps.append(r)
+
+        with patch.object(s1, "request_with_retry", side_effect=dup_resps) as mock_req2, \
+             patch.object(s1.time, "sleep"):
+            recs2 = s1.fetch_single_query(
+                '"copper" "Tafel"',
+                max_records=2,
+                known_keys=set(known),
+                needs_backfill={},
+                max_scan_multiplier=5,
+                early_stop_empty_pages=2,
+            )
+        self.assertEqual(recs2, [])
+        self.assertEqual(mock_req2.call_count, 2)
+
+        # Test max_scan_multiplier page cap: 1 new paper per page, max_records=5, multiplier=2 -> stops at 2 pages
+        cap_pages = [
+            {"results": [_oa_item(f"WC{i}", f"https://doi.org/10.1000/cap_{i}")], "meta": {"next_cursor": f"cc{i+2}"}}
+            for i in range(5)
+        ]
+        cap_resps = []
+        for p in cap_pages:
+            r = MagicMock()
+            r.json.return_value = p
+            cap_resps.append(r)
+
+        with patch.object(s1, "request_with_retry", side_effect=cap_resps) as mock_req3, \
+             patch.object(s1.time, "sleep"):
+            recs3 = s1.fetch_single_query(
+                '"copper" "Tafel"',
+                max_records=5,
+                known_keys=set(),
+                needs_backfill={},
+                max_scan_multiplier=2,
+                early_stop_empty_pages=0,
+            )
+        self.assertEqual(len(recs3), 2)
+        self.assertEqual(mock_req3.call_count, 2)
+
+    def test_s2_bulk_inflight_dedup_zero_extra_requests_and_pure_cache(self):
+        from unittest.mock import MagicMock, patch
+        import semantic_scholar_fetcher as s2f
+
+        def _s2_item(pid, doi, pdf_url=None, abstract="Abs"):
+            return {
+                "paperId": pid,
+                "externalIds": {"DOI": doi},
+                "title": f"S2 {pid}",
+                "year": 2024,
+                "venue": "Corr. Sci.",
+                "isOpenAccess": bool(pdf_url),
+                "openAccessPdf": {"url": pdf_url, "status": "GOLD"} if pdf_url else None,
+                "citationCount": 20,
+                "authors": [{"name": "Bob"}],
+                "abstract": abstract,
+            }
+
+        payload = {
+            "data": [
+                _s2_item("p1", "10.1000/already_known", "https://ex.org/p1.pdf", "Filled abs"),
+                _s2_item("p2", "10.1000/already_full", "https://ex.org/p2.pdf", "Full"),
+                _s2_item("p3", "10.1000/s2_new1", "https://ex.org/p3.pdf", "New 1"),
+                _s2_item("p4", "10.1000/s2_new2", None, "New 2"),
+            ],
+            "token": "next_page_token",
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+
+        known = {"10.1000/already_known", "10.1000/already_full"}
+        needs_backfill = {"10.1000/already_known": {"best_pdf_url"}}
+
+        with patch.object(s2f, "_s2_request_with_retry", return_value=mock_resp) as mock_req:
+            selected, raw_all, n_new, n_skip = s2f._fetch_query_bulk(
+                '"copper" + "Tafel"',
+                max_per_query=2,
+                from_year=2005,
+                known_keys=known,
+                needs_backfill=needs_backfill,
+                max_bulk_pages=2,
+                return_raw=True,
+            )
+
+        # Satisfied 2 new papers within page 1 -> 0 extra HTTP requests!
+        self.assertEqual(mock_req.call_count, 1)
+        self.assertEqual(n_new, 2)
+        self.assertEqual(n_skip, 2)
+        # Raw cache preserves all 4 unfiltered items
+        self.assertEqual(len(raw_all), 4)
+        # Selected contains 2 new + 1 backfill for already_known
+        sel_dois = [r["doi"] for r in selected]
+        self.assertEqual(sel_dois, [
+            "https://doi.org/10.1000/s2_new1",
+            "https://doi.org/10.1000/s2_new2",
+            "https://doi.org/10.1000/already_known",
+        ])
+        self.assertNotIn("10.1000/already_known", needs_backfill)
+
+        # End-to-end cache reuse across different known_keys via search_semantic_scholar
+        mem_cache: dict = {"queries": {}, "pdf_batch": {}}
+        with patch.object(s2f, "_load_s2_cache", side_effect=lambda: mem_cache), \
+             patch.object(s2f, "_save_s2_cache", side_effect=lambda c: mem_cache.update(c)), \
+             patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
+             patch.object(s2f, "_s2_request_with_retry", return_value=mock_resp) as mock_req2:
+            # First call populates raw cache with all 4 items, returns first 1 new (p3)
+            run1 = s2f.search_semantic_scholar(
+                ["q1", "q2"],
+                max_per_query=1,
+                from_year=2005,
+                use_cache=True,
+                known_keys={"10.1000/already_known", "10.1000/already_full"},
+                needs_backfill={},
+            )
+            self.assertEqual(mock_req2.call_count, 1)
+            self.assertEqual([r["doi"] for r in run1], ["https://doi.org/10.1000/s2_new1"])
+
+            # Second call reuses cache (0 extra API calls) with p3 now known -> yields p4!
+            run2 = s2f.search_semantic_scholar(
+                ["q1", "q2"],
+                max_per_query=1,
+                from_year=2005,
+                use_cache=True,
+                known_keys={"10.1000/already_known", "10.1000/already_full", "10.1000/s2_new1"},
+                needs_backfill={},
+            )
+            self.assertEqual(mock_req2.call_count, 1)
+            self.assertEqual([r["doi"] for r in run2], ["https://doi.org/10.1000/s2_new2"])
+
+        # Degraded fallback (bulk returns None, standard succeeds) must NOT pollute bulk_raw cache
+        degraded_cache: dict = {"queries": {}, "pdf_batch": {}}
+        with patch.object(s2f, "_load_s2_cache", side_effect=lambda: degraded_cache), \
+             patch.object(s2f, "_save_s2_cache", side_effect=lambda c: degraded_cache.update(c)), \
+             patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
+             patch.object(s2f, "_fetch_query_bulk", return_value=None), \
+             patch.object(s2f, "_fetch_query_standard", return_value=([{"doi": "https://doi.org/10.1000/s2_new1"}], [{"doi": "https://doi.org/10.1000/s2_new1"}], 1, 0)):
+            run_deg = s2f.search_semantic_scholar(["q1", "q2"], max_per_query=1, from_year=2005, use_cache=True, known_keys=set())
+            self.assertEqual(len(run_deg), 1)
+            self.assertEqual(degraded_cache["queries"], {})
+
+    def test_europepmc_inflight_dedup_preserves_pmcid_backfill(self):
+        from unittest.mock import MagicMock, patch
+        import europepmc_fetcher as epmc
+
+        page1 = {
+            "resultList": {
+                "result": [
+                    # Already known AND already has pmcid -> skip
+                    {"pmcid": "PMC100", "doi": "10.1000/has_pmc", "title": "Copper corrosion 1", "abstractText": "Cu Tafel", "pubYear": "2024"},
+                    # Already known DOI but missing pmcid -> keep as backfill (does not consume new limit)
+                    {"pmcid": "PMC200", "doi": "10.1000/need_pmc", "title": "Copper corrosion 2", "abstractText": "Cu Tafel", "pubYear": "2024"},
+                    # Brand-new paper -> counts toward limit=1
+                    {"pmcid": "PMC300", "doi": "10.1000/epmc_new", "title": "Copper corrosion 3", "abstractText": "Cu Tafel", "pubYear": "2024"},
+                ]
+            },
+            "nextCursorMark": "cursor2",
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = page1
+        mock_resp.raise_for_status.return_value = None
+
+        known = {"10.1000/has_pmc", "10.1000/need_pmc"}
+        needs_backfill = {"10.1000/need_pmc": {"pmcid"}}
+
+        with patch.object(epmc.requests, "get", return_value=mock_resp) as mock_get, \
+             patch.object(epmc.time, "sleep"):
+            recs = epmc.search_europepmc_metadata(
+                max_papers=1,
+                modes=["corrosion"],
+                known_keys=known,
+                needs_backfill=needs_backfill,
+                max_scan_multiplier=3,
+                early_stop_empty_pages=2,
+            )
+
+        self.assertEqual(mock_get.call_count, 1)
+        pmcids = [r["pmcid"] for r in recs]
+        self.assertEqual(pmcids, ["PMC200", "PMC300"])
+        self.assertNotIn("10.1000/need_pmc", needs_backfill)
+        self.assertIn("10.1000/epmc_new", known)
+
+        # Consecutive empty-page early stop (stops after 2 all-duplicate pages)
+        dup_resps = []
+        for i in range(4):
+            r = MagicMock()
+            r.json.return_value = {
+                "resultList": {
+                    "result": [
+                        {"pmcid": f"PMC90{i}", "doi": "10.1000/has_pmc", "title": "Copper corrosion", "abstractText": "Cu Tafel", "pubYear": "2024"}
+                    ]
+                },
+                "nextCursorMark": f"cursor_{i+2}",
+            }
+            r.raise_for_status.return_value = None
+            dup_resps.append(r)
+
+        with patch.object(epmc.requests, "get", side_effect=dup_resps) as mock_get2, \
+             patch.object(epmc.time, "sleep"):
+            recs_empty = epmc.search_europepmc_metadata(
+                max_papers=5,
+                modes=["corrosion"],
+                known_keys=set(known),
+                needs_backfill={},
+                max_scan_multiplier=5,
+                early_stop_empty_pages=2,
+            )
+        self.assertEqual(recs_empty, [])
+        self.assertEqual(mock_get2.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

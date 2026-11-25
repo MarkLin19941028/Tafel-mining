@@ -17,9 +17,14 @@ MAILTO: str = "cy90207@gmail.com"
 SKIP_EXISTING_STEP1: bool = True
 SKIP_EXISTING_STEP2: bool = True
 
+# ✏️ Step 1 搜尋過程中即時比對去重（跳過既有 metadata 與本次已見論文，兼顧效能與增量效益）
+STEP1_INFLIGHT_DEDUP: bool = True
+STEP1_MAX_SCAN_MULTIPLIER: int = 3       # 單組查詢最大翻頁倍率（避免無限翻頁消耗配額）
+STEP1_EARLY_STOP_EMPTY_PAGES: int = 2    # 連續幾頁無新論文即提前結束該組查詢
+
 # ✏️ OpenAlex 每組關鍵字最多抓取篇數
 #    測試建議 50，正式建議 200~300（稀缺材料可調至 500）
-MAX_RECORDS_PER_QUERY: int = 300
+MAX_RECORDS_PER_QUERY: int = 1
 
 # ✏️ Step 3 下載 PDF 時每篇間隔秒數（避免觸發出版社防爬蟲封鎖）
 DOWNLOAD_DELAY: float = 2.0
@@ -55,13 +60,13 @@ SEARCH_MODES: list[str] = [
 # ✏️ Semantic Scholar API（金鑰請設於 .env 的 SEMANTIC_SCHOLAR_API_KEY；留空亦可運作）
 ENABLE_SEMANTIC_SCHOLAR: bool = True
 SEMANTIC_SCHOLAR_USE_BULK: bool = True          # 建議維持 True：依選取模式濃縮為少數高密度布林查詢走 /search/bulk
-SEMANTIC_SCHOLAR_MAX_PER_QUERY: int = 1000      # 建議 800~1000（/search/bulk 單次上限為 1,000）
+SEMANTIC_SCHOLAR_MAX_PER_QUERY: int = 1      # 建議 800~1000（/search/bulk 單次上限為 1,000）
 SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY: int = 15   # 僅在 USE_BULK=False 且無 Key 時生效的查詢組數上限
 SEMANTIC_SCHOLAR_DELAY: float = 3.0             # 請求間最小間隔秒數（遇 429 會自動 AIMD 動態拉長）
 
 # ✏️ Europe PMC 開放全文 XML（免 API Key、零 403 封鎖，可直接取得原生結構化表格）
 ENABLE_EUROPEPMC_XML: bool = True
-EUROPEPMC_MAX_PAPERS: int = 800                 # 建議 500~1000
+EUROPEPMC_MAX_PAPERS: int = 1                 # 建議 500~1000
 EUROPEPMC_DELAY: float = 0.5                    # Europe PMC API 請求間隔秒數
 
 # ✏️ Materials Project API（Step 7 物理與 Pourbaix 熱力學強化；金鑰請設於 .env 的 MP_API_KEY）

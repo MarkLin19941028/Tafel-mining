@@ -5,6 +5,7 @@ Europe PMC 開放全文 XML 擷取與 JATS 解析模組
 """
 
 import json
+import math
 import os
 import re
 import time
@@ -20,11 +21,14 @@ from config import (
     REQUEST_TIMEOUT,
     REQUIRE_TARGET_IN_TITLE_ABSTRACT,
     SEARCH_MODES,
+    STEP1_EARLY_STOP_EMPTY_PAGES,
+    STEP1_MAX_SCAN_MULTIPLIER,
     TARGET_METAL,
     TEXT_DIR,
     build_target_regex,
     parse_search_modes,
 )
+from record_keys import make_record_key
 
 EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EPMC_XML_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
@@ -240,27 +244,46 @@ def try_fallback_from_europepmc(
     return (wrote_txt or upgraded_tables), n_tables
 
 
-def run_europepmc_search(
+def search_europepmc_metadata(
     max_papers: int | None = None,
-    text_dir: str = TEXT_DIR,
-) -> dict:
+    modes: list[str] | tuple[str, ...] | str | None = None,
+    known_keys: set[str] | None = None,
+    needs_backfill: dict[str, set[str]] | None = None,
+    max_scan_multiplier: int | None = None,
+    early_stop_empty_pages: int | None = None,
+) -> list[dict]:
     """
-    主動向 Europe PMC 搜尋目標金屬的開放腐蝕全文 XML，
-    解析並寫入 data/<METAL>/texts/（含去重與 XML 表格升級）。
+    查詢 Europe PMC 開放取用文獻 metadata（供 Step 1 與 OpenAlex / Semantic Scholar 統一去重）。
+    回傳與 Step 1 相容的 dict 清單（含 pmcid 與 doi）。
+    支援傳入 known_keys / needs_backfill 進行搜尋過程即時去重與 PMCID 回補。
     """
     limit = EUROPEPMC_MAX_PAPERS if max_papers is None else max_papers
     if limit <= 0:
-        return {"new_txt": 0, "upgraded_tables": 0, "skipped": 0, "failed": 0}
+        return []
 
-    query = build_europepmc_query()
-    print(f"\n[Europe PMC] Searching open-access papers (modes={','.join(SEARCH_MODES)}, limit={limit})...")
+    scan_mult = max(1, int(STEP1_MAX_SCAN_MULTIPLIER if max_scan_multiplier is None else max_scan_multiplier))
+    early_stop = max(0, int(STEP1_EARLY_STOP_EMPTY_PAGES if early_stop_empty_pages is None else early_stop_empty_pages))
+    inflight = known_keys is not None
+    max_pages = max(1, math.ceil(limit / 100) * scan_mult)
+
+    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
+    query = build_europepmc_query(modes=active_modes)
+    print(f"\n[Europe PMC] Searching open-access papers (modes={','.join(active_modes)}, limit={limit})...")
     print(f"  Query: {query}")
 
     target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
 
-    candidates: list[dict] = []
+    records: list[dict] = []
+    seen_pmcids: set[str] = set()
+    new_count = 0
+    skipped_dup = 0
+    backfill_count = 0
+    pages_scanned = 0
+    empty_pages = 0
     cursor_mark = "*"
-    while len(candidates) < limit:
+
+    while new_count < limit:
+        page_size = 100 if inflight else min(100, limit - new_count)
         try:
             resp = requests.get(
                 EPMC_SEARCH_URL,
@@ -268,7 +291,7 @@ def run_europepmc_search(
                     "query": query,
                     "format": "json",
                     "resultType": "core",
-                    "pageSize": min(100, limit - len(candidates)),
+                    "pageSize": page_size,
                     "cursorMark": cursor_mark,
                 },
                 timeout=REQUEST_TIMEOUT,
@@ -283,20 +306,81 @@ def run_europepmc_search(
         if not results:
             break
 
+        page_new = 0
         for item in results:
             pmcid = item.get("pmcid")
-            if not pmcid:
+            if not pmcid or pmcid in seen_pmcids:
                 continue
+            title = item.get("title") or ""
+            abstract = item.get("abstractText") or ""
             if target_pat is not None:
-                ta = f"{item.get('title', '')} {item.get('abstractText', '')}"
-                if not target_pat.search(ta):
+                if not target_pat.search(f"{title} {abstract}"):
                     continue
-            candidates.append({
+            seen_pmcids.add(pmcid)
+            raw_doi = (item.get("doi") or "").strip()
+            doi_url = (
+                raw_doi
+                if (not raw_doi or raw_doi.startswith("http"))
+                else f"https://doi.org/{raw_doi}"
+            ) or None
+            pub_year = item.get("pubYear")
+            year_val = int(pub_year) if str(pub_year).isdigit() else None
+            rec = {
+                "query": query,
+                "openalex_id": None,
+                "s2_paper_id": None,
                 "pmcid": pmcid,
-                "doi": item.get("doi"),
-                "title": item.get("title", ""),
-            })
-            if len(candidates) >= limit:
+                "source_api": "europepmc",
+                "doi": doi_url,
+                "title": title,
+                "year": year_val,
+                "journal": item.get("journalTitle"),
+                "is_oa": True,
+                "oa_status": "europepmc",
+                "oa_url": f"https://europepmc.org/article/PMC/{pmcid}",
+                "best_pdf_url": None,
+                "primary_pdf_url": None,
+                "cited_by_count": item.get("citedByCount"),
+                "authors": item.get("authorString"),
+                "abstract": abstract,
+            }
+
+            key = make_record_key(doi_url, pmcid)
+            if inflight and key and key in known_keys:
+                skipped_dup += 1
+                missing = needs_backfill.get(key) if needs_backfill is not None else None
+                if missing:
+                    can_fill_pmcid = "pmcid" in missing
+                    can_fill_abs = ("abstract" in missing) and bool(abstract.strip())
+                    if can_fill_pmcid or can_fill_abs:
+                        records.append(rec)
+                        backfill_count += 1
+                        if can_fill_pmcid:
+                            missing.discard("pmcid")
+                        if can_fill_abs:
+                            missing.discard("abstract")
+                        if not missing:
+                            needs_backfill.pop(key, None)
+                continue
+
+            records.append(rec)
+            new_count += 1
+            page_new += 1
+            if inflight and key:
+                known_keys.add(key)
+
+            if new_count >= limit:
+                break
+
+        pages_scanned += 1
+        empty_pages = (empty_pages + 1) if page_new == 0 else 0
+
+        if new_count >= limit:
+            break
+        if inflight:
+            if early_stop > 0 and empty_pages >= early_stop:
+                break
+            if pages_scanned >= max_pages:
                 break
 
         next_cursor = data.get("nextCursorMark")
@@ -305,7 +389,28 @@ def run_europepmc_search(
         cursor_mark = next_cursor
         time.sleep(EUROPEPMC_DELAY)
 
-    print(f"  Found {len(candidates)} open-access corrosion candidates with PMCID")
+    if inflight:
+        bf_msg = f", backfill {backfill_count}" if backfill_count else ""
+        print(
+            f"  Found {new_count} new open-access candidates with PMCID "
+            f"(skipped {skipped_dup} dup{bf_msg}, {pages_scanned} pages)"
+        )
+    else:
+        print(f"  Found {len(records)} open-access candidates with PMCID")
+    return records
+
+
+def run_europepmc_search(
+    max_papers: int | None = None,
+    text_dir: str = TEXT_DIR,
+) -> dict:
+    """
+    主動向 Europe PMC 搜尋目標金屬的開放腐蝕全文 XML，
+    解析並寫入 data/<METAL>/texts/（含去重與 XML 表格升級）。
+    """
+    candidates = search_europepmc_metadata(max_papers=max_papers)
+    if not candidates:
+        return {"new_txt": 0, "upgraded_tables": 0, "skipped": 0, "failed": 0}
 
     new_txt = 0
     upgraded_tables = 0

@@ -9,6 +9,7 @@ Semantic Scholar Academic Graph API v1 擷取模組（防 429 強化版）
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
@@ -28,6 +29,7 @@ from config import (
     SEMANTIC_SCHOLAR_MAX_PER_QUERY,
     SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY,
 )
+from record_keys import make_record_key
 
 S2_BULK_URL = "https://api.semanticscholar.org/graph/v1/paper/search/bulk"
 S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -308,7 +310,11 @@ def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
     return (high + rest)[:SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY]
 
 
-def _parse_s2_items(items: list[dict], query_str: str, max_per_query: int) -> list[dict]:
+def _parse_s2_items(
+    items: list[dict],
+    query_str: str,
+    max_per_query: int | None = None,
+) -> list[dict]:
     recs: list[dict] = []
     for item in items:
         if not isinstance(item, dict):
@@ -342,39 +348,197 @@ def _parse_s2_items(items: list[dict], query_str: str, max_per_query: int) -> li
             "authors": "; ".join(authors[:5]),
             "abstract": item.get("abstract") or "",
         })
-        if len(recs) >= max_per_query:
+        if max_per_query is not None and len(recs) >= max_per_query:
             break
     return recs
 
 
-def _fetch_query_bulk(query_str: str, max_per_query: int, from_year: int) -> list[dict] | None:
+def _filter_s2_records(
+    raw_recs: list[dict],
+    max_new: int,
+    known_keys: set[str] | None = None,
+    needs_backfill: dict[str, set[str]] | None = None,
+) -> tuple[list[dict], list[dict], int]:
     """
-    使用 /graph/v1/paper/search/bulk 單次取回最多 1,000 筆結果（依引用數排序），
-    只需 1 次 HTTP 請求即可填滿 max_per_query 筆具 DOI 的論文。
-    回傳 list[dict]；若請求失敗則回傳 None。
+    對 S2 原始解析結果進行即時去重：
+    - 新論文計入 max_new 並寫入 known_keys
+    - 已存在但缺漏 best_pdf_url / abstract 的論文收進 backfill_recs（不消耗 max_new）
+    回傳 (new_recs, backfill_recs, skipped_dup)。
     """
-    params = {
-        "query": query_str,
-        "year": f"{from_year}-",
-        "fields": S2_SEARCH_FIELDS,
-        "sort": "citationCount:desc",
-    }
-    resp = _s2_request_with_retry("GET", S2_BULK_URL, params=params)
-    if resp is None:
-        return None
-    payload = resp.json()
-    items = payload.get("data") or []
-    return _parse_s2_items(items, query_str, max_per_query)
+    if known_keys is None:
+        return raw_recs[:max_new], [], 0
+
+    new_recs: list[dict] = []
+    backfill_recs: list[dict] = []
+    skipped_dup = 0
+
+    for rec in raw_recs:
+        key = make_record_key(rec.get("doi"))
+        if not key:
+            continue
+
+        if key in known_keys:
+            skipped_dup += 1
+            missing = needs_backfill.get(key) if needs_backfill is not None else None
+            if missing:
+                pdf_url = rec.get("best_pdf_url")
+                abstract = rec.get("abstract") or ""
+                can_fill_pdf = ("best_pdf_url" in missing) and bool(pdf_url) and str(pdf_url).startswith("http")
+                can_fill_abs = ("abstract" in missing) and bool(str(abstract).strip())
+                if can_fill_pdf or can_fill_abs:
+                    backfill_recs.append(rec)
+                    if can_fill_pdf:
+                        missing.discard("best_pdf_url")
+                    if can_fill_abs:
+                        missing.discard("abstract")
+                    if not missing:
+                        needs_backfill.pop(key, None)
+            continue
+
+        if len(new_recs) >= max_new:
+            continue
+
+        new_recs.append(rec)
+        known_keys.add(key)
+        if needs_backfill is not None:
+            missing_new: set[str] = {"pmcid"}
+            if not (rec.get("best_pdf_url") and str(rec.get("best_pdf_url")).startswith("http")):
+                missing_new.add("best_pdf_url")
+            if not str(rec.get("abstract") or "").strip():
+                missing_new.add("abstract")
+            needs_backfill[key] = missing_new
+
+    return new_recs, backfill_recs, skipped_dup
 
 
-def _fetch_query_standard(query_str: str, max_per_query: int, from_year: int) -> list[dict] | None:
+def _fetch_query_bulk(
+    query_str: str,
+    max_per_query: int,
+    from_year: int,
+    *,
+    known_keys: set[str] | None = None,
+    needs_backfill: dict[str, set[str]] | None = None,
+    max_bulk_pages: int = 2,
+    early_stop_empty_pages: int | None = None,
+    return_raw: bool = False,
+) -> list[dict] | tuple[list[dict], list[dict], int, int] | None:
+    """
+    使用 /graph/v1/paper/search/bulk 單次取回最多 1,000 筆結果（依引用數排序）：
+    - 未啟用 known_keys 時：單次請求取回並回傳最多 max_per_query 筆。
+    - 啟用 known_keys 時：先從單次 1,000 筆內過濾舊 DOI（0 額外請求），若仍不足才依護欄續翻 token。
+    - return_raw=True 時回傳 (selected_recs, raw_recs, new_count, skipped_dup) 供外層保存未過濾快取。
+    """
+    early_stop = max(
+        0,
+        int(
+            getattr(config, "STEP1_EARLY_STOP_EMPTY_PAGES", 2)
+            if early_stop_empty_pages is None
+            else early_stop_empty_pages
+        ),
+    )
+    page_cap = max(1, int(max_bulk_pages)) if known_keys is not None else 1
+
+    raw_all: list[dict] = []
+    selected_new: list[dict] = []
+    selected_backfill: list[dict] = []
+    total_skipped = 0
+    empty_pages = 0
+    token: str | None = None
+
+    for page_idx in range(page_cap):
+        params = {
+            "query": query_str,
+            "year": f"{from_year}-",
+            "fields": S2_SEARCH_FIELDS,
+            "sort": "citationCount:desc",
+        }
+        if token:
+            params["token"] = token
+
+        resp = _s2_request_with_retry("GET", S2_BULK_URL, params=params)
+        if resp is None:
+            if page_idx == 0:
+                return None
+            break
+
+        payload = resp.json()
+        items = payload.get("data") or []
+        if not items:
+            break
+
+        page_raw = _parse_s2_items(items, query_str, max_per_query=None)
+        raw_all.extend(page_raw)
+
+        remaining = max(0, max_per_query - len(selected_new))
+        page_new, page_bf, page_skip = _filter_s2_records(
+            page_raw,
+            remaining,
+            known_keys=known_keys,
+            needs_backfill=needs_backfill,
+        )
+        selected_new.extend(page_new)
+        selected_backfill.extend(page_bf)
+        total_skipped += page_skip
+
+        if len(selected_new) >= max_per_query:
+            break
+
+        empty_pages = (empty_pages + 1) if len(page_new) == 0 else 0
+        if known_keys is not None and early_stop > 0 and empty_pages >= early_stop:
+            break
+
+        token = payload.get("token")
+        if not token:
+            break
+
+    combined = selected_new + selected_backfill
+    if return_raw:
+        return combined, raw_all, len(selected_new), total_skipped
+    return combined
+
+
+def _fetch_query_standard(
+    query_str: str,
+    max_per_query: int,
+    from_year: int,
+    *,
+    known_keys: set[str] | None = None,
+    needs_backfill: dict[str, set[str]] | None = None,
+    max_scan_multiplier: int | None = None,
+    early_stop_empty_pages: int | None = None,
+    return_raw: bool = False,
+) -> list[dict] | tuple[list[dict], list[dict], int, int] | None:
     """標準 /graph/v1/paper/search 檢索（支援單元測試或作為 bulk 的備援）。"""
     clean_q = _normalize_query_for_s2(re.sub(r"[+|()]", " ", query_str))
-    offset = 0
-    query_recs: list[dict] = []
+    scan_mult = max(
+        1,
+        int(
+            getattr(config, "STEP1_MAX_SCAN_MULTIPLIER", 3)
+            if max_scan_multiplier is None
+            else max_scan_multiplier
+        ),
+    )
+    early_stop = max(
+        0,
+        int(
+            getattr(config, "STEP1_EARLY_STOP_EMPTY_PAGES", 2)
+            if early_stop_empty_pages is None
+            else early_stop_empty_pages
+        ),
+    )
+    inflight = known_keys is not None
+    max_pages = max(1, math.ceil(max(1, max_per_query) / 100) * scan_mult)
 
-    while len(query_recs) < max_per_query:
-        limit = min(100, max_per_query - len(query_recs))
+    offset = 0
+    raw_all: list[dict] = []
+    selected_new: list[dict] = []
+    selected_backfill: list[dict] = []
+    total_skipped = 0
+    pages_scanned = 0
+    empty_pages = 0
+
+    while len(selected_new) < max_per_query:
+        limit = 100 if inflight else min(100, max_per_query - len(selected_new))
         params = {
             "query": clean_q,
             "offset": offset,
@@ -384,22 +548,49 @@ def _fetch_query_standard(query_str: str, max_per_query: int, from_year: int) ->
         }
         resp = _s2_request_with_retry("GET", S2_SEARCH_URL, params=params)
         if resp is None:
-            return None if not query_recs else query_recs
+            if pages_scanned == 0:
+                return None
+            break
 
         payload = resp.json()
         items = payload.get("data") or []
         if not items:
             break
 
-        parsed = _parse_s2_items(items, query_str, max_per_query - len(query_recs))
-        query_recs.extend(parsed)
+        page_raw = _parse_s2_items(items, query_str, max_per_query=None)
+        raw_all.extend(page_raw)
+
+        remaining = max(0, max_per_query - len(selected_new))
+        page_new, page_bf, page_skip = _filter_s2_records(
+            page_raw,
+            remaining,
+            known_keys=known_keys,
+            needs_backfill=needs_backfill,
+        )
+        selected_new.extend(page_new)
+        selected_backfill.extend(page_bf)
+        total_skipped += page_skip
+
+        pages_scanned += 1
+        empty_pages = (empty_pages + 1) if len(page_new) == 0 else 0
+
+        if len(selected_new) >= max_per_query:
+            break
+        if inflight:
+            if early_stop > 0 and empty_pages >= early_stop:
+                break
+            if pages_scanned >= max_pages:
+                break
 
         next_offset = payload.get("next")
         if next_offset is None or len(items) < limit:
             break
         offset = next_offset
 
-    return query_recs
+    combined = selected_new + selected_backfill
+    if return_raw:
+        return combined, raw_all, len(selected_new), total_skipped
+    return combined
 
 
 def search_semantic_scholar(
@@ -407,6 +598,8 @@ def search_semantic_scholar(
     max_per_query: int | None = None,
     from_year: int | None = None,
     use_cache: bool | None = None,
+    known_keys: set[str] | None = None,
+    needs_backfill: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """
     使用 Semantic Scholar Academic Graph API 檢索論文，
@@ -434,25 +627,69 @@ def search_semantic_scholar(
     cache_hits = 0
 
     all_records: list[dict] = []
+    total_new = 0
+    total_skipped = 0
     consecutive_failures = 0
+    max_bulk_pages = min(2, max(1, int(getattr(config, "STEP1_MAX_SCAN_MULTIPLIER", 3))))
 
     for q in tqdm(selected_queries, desc="Semantic Scholar search"):
-        cache_key = f"{q}||y>={from_year}||m={max_per_query}"
-        if use_cache and cache_key in query_cache:
-            cached_recs = query_cache[cache_key]
-            all_records.extend(cached_recs)
+        raw_cache_key = f"{q}||y>={from_year}||bulk_raw" if use_bulk else f"{q}||y>={from_year}||m={max_per_query}"
+        legacy_cache_key = f"{q}||y>={from_year}||m={max_per_query}"
+
+        cached_raw = None
+        if use_cache:
+            if raw_cache_key in query_cache:
+                cached_raw = query_cache[raw_cache_key]
+            elif legacy_cache_key in query_cache:
+                cached_raw = query_cache[legacy_cache_key]
+
+        if cached_raw is not None:
+            new_recs, bf_recs, skipped = _filter_s2_records(
+                cached_raw,
+                max_per_query,
+                known_keys=known_keys,
+                needs_backfill=needs_backfill,
+            )
+            all_records.extend(new_recs)
+            all_records.extend(bf_recs)
+            total_new += len(new_recs)
+            total_skipped += skipped
             cache_hits += 1
             continue
 
+        degraded_from_bulk = False
         if use_bulk:
-            recs = _fetch_query_bulk(q, max_per_query, from_year)
-            # 若 bulk 意外無回應，降級嘗試一次標準 search
-            if recs is None:
-                recs = _fetch_query_standard(q, max_per_query, from_year)
+            res = _fetch_query_bulk(
+                q,
+                max_per_query,
+                from_year,
+                known_keys=known_keys,
+                needs_backfill=needs_backfill,
+                max_bulk_pages=max_bulk_pages,
+                return_raw=True,
+            )
+            # 若 bulk 意外無回應，降級嘗試一次標準 search（不覆寫 bulk_raw 快取）
+            if res is None:
+                degraded_from_bulk = True
+                res = _fetch_query_standard(
+                    q,
+                    max_per_query,
+                    from_year,
+                    known_keys=known_keys,
+                    needs_backfill=needs_backfill,
+                    return_raw=True,
+                )
         else:
-            recs = _fetch_query_standard(q, max_per_query, from_year)
+            res = _fetch_query_standard(
+                q,
+                max_per_query,
+                from_year,
+                known_keys=known_keys,
+                needs_backfill=needs_backfill,
+                return_raw=True,
+            )
 
-        if recs is None:
+        if res is None:
             consecutive_failures += 1
             if consecutive_failures >= 3:
                 print(
@@ -460,19 +697,28 @@ def search_semantic_scholar(
                 )
                 break
         else:
+            recs, raw_recs, q_new, q_skip = res
             consecutive_failures = 0
             all_records.extend(recs)
-            if use_cache:
-                query_cache[cache_key] = recs
+            total_new += q_new
+            total_skipped += q_skip
+            if use_cache and not degraded_from_bulk:
+                query_cache[raw_cache_key] = raw_recs
                 cache["queries"] = query_cache
                 _save_s2_cache(cache)
 
     # 內部先依 DOI 去重回報統計
     unique_dois = {r["doi"].lower() for r in all_records if r.get("doi")}
     cache_msg = f"（快取命中 {cache_hits}/{len(selected_queries)} 組）" if use_cache and cache_hits else ""
-    print(
-        f"[Semantic Scholar] 檢索完成{cache_msg}，共取得 {len(all_records)} 筆記錄（{len(unique_dois)} 篇唯一 DOI）"
-    )
+    if known_keys is not None:
+        print(
+            f"[Semantic Scholar] 檢索完成{cache_msg}，新增 {total_new} 篇"
+            f"（略過重複 {total_skipped} 篇，輸出 {len(all_records)} 筆 / {len(unique_dois)} 篇唯一 DOI）"
+        )
+    else:
+        print(
+            f"[Semantic Scholar] 檢索完成{cache_msg}，共取得 {len(all_records)} 筆記錄（{len(unique_dois)} 篇唯一 DOI）"
+        )
     return all_records
 
 

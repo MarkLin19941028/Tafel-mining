@@ -301,7 +301,7 @@ NAME_PATTERN = re.compile(
     r"\b(?P<name>" + "|".join(
         map(re.escape, sorted(_NAME_TO_SYMBOL, key=len, reverse=True))
     ) + r")\b",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
 TARGET_PATTERN = build_target_regex()
 
@@ -335,7 +335,9 @@ def find_materials(text: str) -> list[tuple[str, str]]:
     found = []
     for m in NAME_PATTERN.finditer(text):
         raw = m.group("name")
-        found.append((m.start(), -len(raw), 0, raw, _NAME_TO_SYMBOL[raw.lower()]))
+        sym = _NAME_TO_SYMBOL.get(raw.lower())
+        if sym:
+            found.append((m.start(), -len(raw), 0, raw, sym))
     for m in SYMBOL_PATTERN.finditer(text):
         sym = m.group("sym")
         if not _is_noise(sym, text, m.start(), m.end()):

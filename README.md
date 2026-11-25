@@ -104,12 +104,15 @@ flowchart LR
 | **先跑單一／少數金屬試水溫** | `python run_all.py Cu`<br>`python run_all.py Cu Co W` | 只對指定金屬跑完 Step 1~7（符號不分大小寫），適合初次測試 |
 | **正式跑完所有預設金屬** | `python run_all.py` | 依 `user_settings.py` 的 `METALS_TO_RUN` 跑完所有金屬與合併強化 |
 | **已抓過文獻，只想從中途步驟重跑** | `python run_all.py --from-step 5`<br>`python run_all.py --from-step 6`<br>`python run_all.py --from-step 7` | 跳過耗時的搜尋與下載（支援 `1`~`7`，亦可搭配金屬名稱）：<br>• `5`：重跑參數萃取 + 合併 + 強化<br>• `6`：只重跑跨金屬合併 + 強化<br>• `7`：只重跑 MP / Pourbaix 特徵強化 |
-| **保留舊資料，補抓其他主題文獻** | `python run_all.py Cu --search-mode cmp_etch inhibitor --append` | `--search-mode` 可多選（`corrosion`、`cmp_etch`、`inhibitor`、`catalysis`、`all`），搭配 `--append` 依 DOI 去重合併 |
+| **只跑指定的局部步驟區間** | `python run_all.py Cu --from-step 2 --to-step 3`<br>`python run_all.py Cu Co --from-step 1 --to-step 3` | 同時指定 `--from-step` 與 `--to-step`（支援 `1`~`7`），可精準只跑其中幾個步驟（例如只跑 Step 2+3，不跑後續 Step 4~7） |
+| **保留舊資料，補抓其他主題文獻** | `python run_all.py Cu --search-mode cmp_etch inhibitor --append` | `--search-mode` 可多選（`corrosion`、`cmp_etch`、`inhibitor`、`catalysis`、`all`），搭配 `--append` 統一搜尋 OpenAlex / S2 / Europe PMC 並依 DOI / PMCID 去重合併，Step 2/3 只處理新增論文 |
+| **重試先前下載失敗的論文** | `python run_all.py Cu --from-step 3 --to-step 3 --retry-failed`<br>`python run_all.py Cu --from-step 3 --retry-failed` | Step 3 預設會依 `<metal>_download_state.json` 自動略過已下載與先前失敗的論文；換網路環境或想重新補抓失敗清單時加上 `--retry-failed` |
 | **忽略快取，從頭強制重抓某金屬** | `python run_all.py Cu --force` | 忽略 Step 1/2 斷點續跑設定，重新查詢 API 並覆寫舊清單 |
 | **查看支援金屬／驗證自訂資料庫** | `python run_all.py --list`<br>`python run_all.py --check-db` | `--list` 查看可用金屬清單；編輯 JSON 新增金屬後請跑 `--check-db` 檢查格式 |
 
 #### 進階控制開關（可自由疊加）
-- **只跑前段、暫不合併或強化**：加上 `--no-merge`（跑完 Step 5 即停）或 `--no-enrich`（跑完 Step 6 合併即停，跳過 Step 7），例如：`python run_all.py TiN --from-step 4 --no-enrich`。
+- **控制結束步驟**：使用 `--to-step N`（預設 `7`）可停在任意步驟，或用 `--no-merge`（停在 Step 5）、`--no-enrich`（停在 Step 6 合併後、跳過 Step 7），例如：`python run_all.py TiN --from-step 4 --no-enrich`。
+- **下載狀態表與離線初始化**：Step 3 會在各金屬 `metadata/` 維護 `<metal>_download_state.json`；舊金屬首次執行時會於本機離線初始化（零網路請求），將已存在檔案記為完成、舊失敗紀錄標記為 `failed_legacy`，之後跑 `--append` 不會重複重試舊失敗論文。
 - **查看完整參數說明**：`python run_all.py --help`。
 
 ### 3. 單步驟獨立執行（Step 1 ~ Step 7）
@@ -171,8 +174,9 @@ flowchart LR
 data/
 ├── <METAL>/                                # 各金屬獨立目錄（例如 Cu, Co, TiN...）
 │   ├── metadata/
-│   │   ├── <metal>_tafel_metadata.csv      # Step 1 搜尋結果
-│   │   ├── <metal>_tafel_with_pdf.csv      # Step 2 PDF 連結清單
+│   │   ├── <metal>_tafel_metadata.csv      # Step 1 搜尋結果（OpenAlex + S2 + Europe PMC）
+│   │   ├── <metal>_tafel_with_pdf.csv      # Step 2 PDF 連結與 PMCID 清單
+│   │   ├── <metal>_download_state.json     # Step 3 下載狀態表（已完成 / 失敗紀錄）
 │   │   └── <metal>_s2_cache.json           # Semantic Scholar 本地快取
 │   ├── pdfs/                               # Step 3 下載的 OA PDF
 │   ├── texts/                              # Step 3/4 產出的純文字 (.txt) 與表格 (_tables.json)

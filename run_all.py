@@ -5,6 +5,8 @@
   .venv/bin/python run_all.py                                             # 依 user_settings.METALS_TO_RUN 跑全部金屬 + Step 6 + Step 7
   .venv/bin/python run_all.py Cu Co W                                     # 臨時只跑指定金屬 + Step 6 + Step 7
   .venv/bin/python run_all.py Cu Co --search-mode cmp_etch inhibitor --append  # 多選搜尋模式並增量合併
+  .venv/bin/python run_all.py Cu --from-step 2 --to-step 3                # 只跑指定區間步驟（Step 2 ~ Step 3）
+  .venv/bin/python run_all.py Cu --from-step 3 --to-step 3 --retry-failed # 重試先前下載失敗的論文
   .venv/bin/python run_all.py --from-step 5                               # 只對所有金屬重跑 Step 5 + Step 6 + Step 7
   .venv/bin/python run_all.py --from-step 7                               # 只重跑 Step 7（Materials Project + Pourbaix 特徵強化）
   .venv/bin/python run_all.py Cu --force                                  # 強制重跑 Cu（忽略 Step 1/2 略過設定）
@@ -18,8 +20,14 @@ import sys
 import time
 
 
-def run_single_metal(from_step: int = 1, force: bool = False, append: bool = False) -> None:
-    """在獨立子進程中執行單一金屬的 Step from_step ~ Step 5。"""
+def run_single_metal(
+    from_step: int = 1,
+    to_step: int = 7,
+    force: bool = False,
+    append: bool = False,
+    retry_failed: bool = False,
+) -> None:
+    """在獨立子進程中執行單一金屬的 Step from_step ~ min(to_step, 5)。"""
     import step1_search_openalex
     import step2_find_pdf_urls
     import step3_download_pdfs
@@ -35,16 +43,16 @@ def run_single_metal(from_step: int = 1, force: bool = False, append: bool = Fal
         TEXT_DIR,
     )
 
-    if from_step <= 1:
+    if from_step <= 1 <= to_step:
         print("=" * 60)
-        print(f"[{METAL_SYMBOL}] Step 1: Search OpenAlex")
+        print(f"[{METAL_SYMBOL}] Step 1: Search OpenAlex / Semantic Scholar / Europe PMC")
         print("=" * 60)
         if not force and not append and SKIP_EXISTING_STEP1 and os.path.exists(STEP1_OUTPUT):
             print(f"⏭️  已存在 Step 1 輸出，略過：{STEP1_OUTPUT}")
         else:
             step1_search_openalex.run_search(append=append)
 
-    if from_step <= 2:
+    if from_step <= 2 <= to_step:
         print("\n" + "=" * 60)
         print(f"[{METAL_SYMBOL}] Step 2: Find PDF URLs via Unpaywall")
         print("=" * 60)
@@ -53,19 +61,19 @@ def run_single_metal(from_step: int = 1, force: bool = False, append: bool = Fal
         else:
             step2_find_pdf_urls.run_find_pdfs(append=append)
 
-    if from_step <= 3:
+    if from_step <= 3 <= to_step:
         print("\n" + "=" * 60)
-        print(f"[{METAL_SYMBOL}] Step 3: Download OA PDFs")
+        print(f"[{METAL_SYMBOL}] Step 3: Download OA PDFs & Europe PMC XML")
         print("=" * 60)
-        step3_download_pdfs.run_download()
+        step3_download_pdfs.run_download(retry_failed=retry_failed)
 
-    if from_step <= 4:
+    if from_step <= 4 <= to_step:
         print("\n" + "=" * 60)
         print(f"[{METAL_SYMBOL}] Step 4: Extract text & tables from PDFs")
         print("=" * 60)
         step4_extract_text.run_extract()
 
-    if from_step <= 5:
+    if from_step <= 5 <= to_step:
         print("\n" + "=" * 60)
         print(f"[{METAL_SYMBOL}] Step 5: Extract electrochemical data")
         print("=" * 60)
@@ -85,24 +93,30 @@ def run_single_metal(from_step: int = 1, force: bool = False, append: bool = Fal
 def run_batch(
     metals: list[str],
     from_step: int = 1,
+    to_step: int = 7,
     force: bool = False,
     append: bool = False,
+    retry_failed: bool = False,
     search_modes: list[str] | None = None,
     no_merge: bool = False,
     no_enrich: bool = False,
 ) -> int:
-    """依序以獨立子進程執行多個金屬，單一金屬失敗不中斷其餘金屬，最後執行 Step 6 合併與 Step 7 物理特徵強化。"""
+    """依序以獨立子進程執行多個金屬，單一金屬失敗不中斷其餘金屬，最後依區間執行 Step 6 與 Step 7。"""
     script_path = os.path.abspath(__file__)
     step6_path = os.path.join(os.path.dirname(script_path), "step6_merge.py")
     step7_path = os.path.join(os.path.dirname(script_path), "step7_enrich_data.py")
+
+    run_merge = (not no_merge) and (from_step <= 6 <= to_step)
+    run_enrich = (not no_enrich) and (from_step <= 7 <= to_step)
 
     print("=" * 65)
     print(f"  TAFEL MINING BATCH PIPELINE")
     print(f"  Metals ({len(metals)}): {', '.join(metals)}")
     print(
-        f"  From step : {from_step}  |  Force: {force}  |  Append: {append}  |  "
-        f"Merge: {not no_merge}  |  Enrich: {not no_enrich}"
+        f"  Steps     : {from_step} -> {to_step}  |  Force: {force}  |  Append: {append}  |  "
+        f"RetryFailed: {retry_failed}"
     )
+    print(f"  Post-steps: Merge: {run_merge}  |  Enrich: {run_enrich}")
     if search_modes:
         print(f"  Search modes override: {', '.join(search_modes)}")
     print("=" * 65)
@@ -122,6 +136,8 @@ def run_batch(
                 env["TAFEL_SEARCH_MODES"] = ",".join(search_modes)
             if append:
                 env["TAFEL_APPEND"] = "1"
+            if retry_failed:
+                env["TAFEL_RETRY_FAILED"] = "1"
             env.pop("TAFEL_QUIET_CONFIG", None)
 
             cmd = [
@@ -131,6 +147,8 @@ def run_batch(
                 metal,
                 "--from-step",
                 str(from_step),
+                "--to-step",
+                str(to_step),
             ]
             if search_modes:
                 cmd.extend(["--search-mode", *search_modes])
@@ -138,6 +156,8 @@ def run_batch(
                 cmd.append("--force")
             if append:
                 cmd.append("--append")
+            if retry_failed:
+                cmd.append("--retry-failed")
 
             proc = subprocess.run(cmd, env=env)
             elapsed = time.time() - t0
@@ -150,7 +170,7 @@ def run_batch(
 
     # Step 6：以獨立子進程執行，確保重新掃描所有剛完成的金屬資料夾
     merge_ok = True
-    if not no_merge and from_step <= 6:
+    if run_merge:
         print("\n" + "=" * 65)
         print("  Step 6: Merge all completed metals")
         print("=" * 65)
@@ -161,7 +181,7 @@ def run_batch(
 
     # Step 7：物理與 Pourbaix 熱力學特徵強化（Materials Project API + 內建熱力學表）
     enrich_ok = True
-    if not no_enrich and merge_ok:
+    if run_enrich and merge_ok:
         print("\n" + "=" * 65)
         print("  Step 7: Enrich physical & Pourbaix thermodynamic features")
         print("=" * 65)
@@ -180,9 +200,9 @@ def run_batch(
             print(f"  {metal:<6s}  {status:<24s}  ({elapsed:.1f}s)")
         print("-" * 65)
         print(f"  Succeeded: {ok_count} / {len(summary)}")
-    if not no_merge and from_step <= 6:
+    if run_merge:
         print(f"  Step 6 Merge : {'✅ OK' if merge_ok else '❌ FAILED'}")
-    if not no_enrich:
+    if run_enrich:
         print(f"  Step 7 Enrich: {'✅ OK' if enrich_ok else '❌ FAILED'}")
     print("=" * 65)
 
@@ -206,6 +226,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="從第幾個步驟開始執行（預設 1；例如 --from-step 5 跑 Step 5~7，--from-step 7 只跑物理強化）",
     )
     parser.add_argument(
+        "--to-step",
+        type=int,
+        default=7,
+        choices=[1, 2, 3, 4, 5, 6, 7],
+        help="執行到第幾個步驟停止（預設 7；搭配 --from-step 可只跑局部區間，例如 --from-step 2 --to-step 3）",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="強制重跑 Step 1 與 Step 2（忽略 user_settings.SKIP_EXISTING_STEP1/2 並覆寫）",
@@ -213,7 +240,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--append",
         action="store_true",
-        help="增量補抓模式：執行 Step 1/2 並與既有 CSV 依 DOI 合併去重（適合搭配 --search-mode 補抓舊金屬）",
+        help="增量補抓模式：Step 1 統一搜尋 OpenAlex/S2/Europe PMC 並依 DOI/PMCID 去重合併，Step 2/3 只處理新論文",
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Step 3 重試先前下載失敗的論文（包含 failed 與離線初始化標記的 failed_legacy）",
     )
     parser.add_argument(
         "--search-mode",
@@ -294,6 +326,10 @@ def main():
     parser = build_cli_parser()
     args = parser.parse_args()
 
+    if args.from_step > args.to_step:
+        print(f"❌ --from-step ({args.from_step}) 不可大於 --to-step ({args.to_step})。")
+        sys.exit(1)
+
     # 內部子進程模式：直接執行單一金屬
     if args.single_metal:
         os.environ["TAFEL_METAL"] = args.single_metal
@@ -301,7 +337,15 @@ def main():
             os.environ["TAFEL_SEARCH_MODES"] = ",".join(args.search_mode)
         if args.append:
             os.environ["TAFEL_APPEND"] = "1"
-        run_single_metal(from_step=args.from_step, force=args.force, append=args.append)
+        if args.retry_failed:
+            os.environ["TAFEL_RETRY_FAILED"] = "1"
+        run_single_metal(
+            from_step=args.from_step,
+            to_step=args.to_step,
+            force=args.force,
+            append=args.append,
+            retry_failed=args.retry_failed,
+        )
         return
 
     # 靜默讀取 config（避免協調器印出重複的預設金屬 banner 或建多餘資料夾）
@@ -357,8 +401,10 @@ def main():
     exit_code = run_batch(
         metals=metals_unique,
         from_step=args.from_step,
+        to_step=args.to_step,
         force=args.force,
         append=args.append,
+        retry_failed=args.retry_failed,
         search_modes=resolved_modes,
         no_merge=args.no_merge,
         no_enrich=args.no_enrich,
