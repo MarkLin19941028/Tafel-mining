@@ -46,6 +46,13 @@ _EPMC_MODE_CLAUSES: dict[str, str] = {
         '(("corrosion inhibitor" OR "corrosion inhibition" OR "inhibition efficiency" OR "organic inhibitor") '
         'AND ("Tafel" OR "potentiodynamic" OR "polarization" OR "icorr" OR "Ecorr"))'
     ),
+    "solvent": (
+        '(("non-aqueous" OR "nonaqueous" OR "organic solvent" OR "organic media" '
+        'OR "anhydrous" OR "semi-aqueous" OR "mixed solvent" OR "water-organic" '
+        'OR "aqueous-organic" OR "trace water" OR "protic solvent" OR "aprotic solvent" '
+        'OR "co-solvent" OR "ethylene glycol" OR "deep eutectic solvent") '
+        'AND ("potentiodynamic" OR "Tafel" OR "corrosion current" OR "Ecorr" OR "icorr" OR "polarization"))'
+    ),
     "catalysis": (
         '(("Tafel slope" OR "exchange current density" OR "linear sweep voltammetry") '
         'AND ("hydrogen evolution" OR "oxygen evolution" OR "oxygen reduction" OR "CO2 reduction" OR "electrocatalyst"))'

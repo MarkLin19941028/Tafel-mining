@@ -86,6 +86,7 @@ VALID_SEARCH_MODES: tuple[str, ...] = (
     "corrosion",
     "cmp_etch",
     "inhibitor",
+    "solvent",
     "catalysis",
 )
 
@@ -93,7 +94,7 @@ VALID_SEARCH_MODES: tuple[str, ...] = (
 def parse_search_modes(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
     """
     將搜尋模式設定或命令列參數正規化為去重後的原子模式清單。
-    合法原子模式：corrosion, cmp_etch, inhibitor, catalysis（另支援 'all' 展開全部 4 種）。
+    合法原子模式：corrosion, cmp_etch, inhibitor, solvent, catalysis（另支援 'all' 展開全部 5 種）。
     """
     if raw is None:
         tokens: list[str] = []
@@ -260,6 +261,36 @@ _INHIBITOR_QUERIES = [
     *INHIBITOR_QUERIES,
 ]
 
+_SOLVENT_QUERIES = [
+    # --- 非水 / 有機 / 半水 / 混合溶劑核心 ---
+    f'"{TARGET_METAL}" "non-aqueous" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "nonaqueous" "corrosion" "Tafel"',
+    f'"{TARGET_METAL}" "organic solvent" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "organic media" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "anhydrous" "corrosion" "potentiodynamic"',
+    f'"{TARGET_METAL}" "semi-aqueous" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "mixed solvent" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "water-organic" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "trace water" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "protic solvent" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "aprotic solvent" "corrosion" "polarization"',
+    f'"{METAL_SYMBOL}" "non-aqueous" "potentiodynamic polarization"',
+    f'"{METAL_SYMBOL}" "organic solvent" "corrosion" "Tafel"',
+
+    # --- 常見極性質子 / 非質子有機溶劑、共溶劑與共晶溶劑 ---
+    f'"{TARGET_METAL}" "aqueous-organic" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "co-solvent" "corrosion" "potentiodynamic"',
+    f'"{TARGET_METAL}" "methanol" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "ethanol" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "ethylene glycol" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "DMSO" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "DMF" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "acetonitrile" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "NMP" "corrosion" "polarization"',
+    f'"{TARGET_METAL}" "deep eutectic solvent" "potentiodynamic polarization"',
+    f'"{TARGET_METAL}" "ionic liquid" "potentiodynamic polarization" corrosion',
+]
+
 _CATALYSIS_QUERIES = [
     f'"{TARGET_METAL}" "Tafel slope"',
     f'"{TARGET_METAL}" "Tafel plot"',
@@ -282,6 +313,7 @@ _MODE_QUERY_MAP: dict[str, list[str]] = {
     "corrosion": _CORROSION_QUERIES,
     "cmp_etch": _CMP_ETCH_QUERIES,
     "inhibitor": _INHIBITOR_QUERIES,
+    "solvent": _SOLVENT_QUERIES,
     "catalysis": _CATALYSIS_QUERIES,
 }
 

@@ -210,7 +210,7 @@ def _s2_request_with_retry(
 
 def build_grouped_s2_queries(modes: list[str] | tuple[str, ...] | str | None = None) -> list[str]:
     """
-    依選取的搜尋模式（corrosion, cmp_etch, inhibitor, catalysis）組裝高容量布林查詢。
+    依選取的搜尋模式（corrosion, cmp_etch, inhibitor, solvent, catalysis）組裝高容量布林查詢。
     因為 /paper/search/bulk 單次 HTTP 請求即可回傳最多 1,000 篇論文，
     濃縮為少數布林請求可將 API 呼叫次數減少 >90%，徹底避免連續請求觸發 429。
     """
@@ -261,7 +261,18 @@ def build_grouped_s2_queries(modes: list[str] | tuple[str, ...] | str | None = N
             f'+ ("potentiodynamic" | "Tafel" | "Ecorr" | "icorr" | "corrosion current" | "polarization")'
         )
 
-    # 4. 電催化（HER / OER / ORR / CO2RR / 交換電流密度）
+    # 4. 非水／有機／半水／混合溶劑與共晶溶劑環境
+    if "solvent" in active_modes:
+        grouped.append(
+            f'{metal_clause} + ("non-aqueous" | "nonaqueous" | "organic solvent" | "organic media" '
+            f'| "anhydrous" | "semi-aqueous" | "mixed solvent" | "water-organic" | "aqueous-organic" '
+            f'| "trace water" | "protic solvent" | "aprotic solvent" | "co-solvent" '
+            f'| "methanol" | "ethanol" | "ethylene glycol" | "DMSO" | "DMF" | "NMP" '
+            f'| "acetonitrile" | "deep eutectic solvent") '
+            f'+ ("potentiodynamic" | "Tafel" | "Ecorr" | "icorr" | "corrosion current" | "polarization")'
+        )
+
+    # 5. 電催化（HER / OER / ORR / CO2RR / 交換電流密度）
     if "catalysis" in active_modes:
         grouped.append(
             f'{metal_clause} + ("Tafel slope" | "Tafel plot" | "exchange current density" | "linear sweep voltammetry") '
@@ -302,8 +313,9 @@ def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
     priority_terms = (
         "cmp", "chemical mechanical", "slurry", "wet etch", "h2o2",
         "periodate", "kio4", "naclo", "fe(no3)3", "sc-1", "inhibitor",
-        "inhibition", "triazole", "imidazole", "potentiodynamic",
-        "corrosion current", "tafel", "ecorr",
+        "inhibition", "triazole", "imidazole", "non-aqueous", "nonaqueous",
+        "organic solvent", "semi-aqueous", "mixed solvent", "deep eutectic",
+        "potentiodynamic", "corrosion current", "tafel", "ecorr",
     )
     high = [q for q in normalized if any(t in q.lower() for t in priority_terms)]
     rest = [q for q in normalized if q not in high]

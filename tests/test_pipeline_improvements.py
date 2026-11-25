@@ -391,8 +391,9 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
         self.assertEqual(config.parse_search_modes("cmp_etch, inhibitor"), ["cmp_etch", "inhibitor"])
         self.assertEqual(
             config.parse_search_modes("all"),
-            ["corrosion", "cmp_etch", "inhibitor", "catalysis"],
+            ["corrosion", "cmp_etch", "inhibitor", "solvent", "catalysis"],
         )
+        self.assertEqual(config.parse_search_modes("solvent"), ["solvent"])
         with self.assertRaises(ValueError):
             config.parse_search_modes(["cmp_etch", "unknown_mode"])
 
@@ -401,15 +402,43 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
         self.assertTrue(any('"CMP"' in q for q in oa_cmp_inh))
         self.assertTrue(any('"corrosion inhibitor"' in q for q in oa_cmp_inh))
         self.assertFalse(any('"hydrogen evolution"' in q for q in oa_cmp_inh))
+        self.assertFalse(any('"non-aqueous"' in q for q in oa_cmp_inh))
+
+        oa_solvent = config.build_search_queries(["solvent"])
+        for kw in (
+            "non-aqueous",
+            "nonaqueous",
+            "organic solvent",
+            "organic media",
+            "anhydrous",
+            "semi-aqueous",
+            "mixed solvent",
+            "water-organic",
+            "trace water",
+            "protic solvent",
+            "aprotic solvent",
+        ):
+            self.assertTrue(any(f'"{kw}"' in q for q in oa_solvent), f"Missing solvent keyword: {kw}")
+        self.assertFalse(any('"CMP"' in q for q in oa_solvent))
 
         s2_cat = s2f.build_grouped_s2_queries(["catalysis"])
         self.assertTrue(any("hydrogen evolution" in q for q in s2_cat))
         self.assertFalse(any("corrosion inhibitor" in q for q in s2_cat))
 
+        s2_solvent = s2f.build_grouped_s2_queries(["solvent"])
+        self.assertEqual(len(s2_solvent), 1)
+        self.assertIn('"non-aqueous"', s2_solvent[0])
+        self.assertIn('"aprotic solvent"', s2_solvent[0])
+
         epmc_cmp_inh = epmc.build_europepmc_query(["cmp_etch", "inhibitor"])
         self.assertIn('"chemical mechanical"', epmc_cmp_inh)
         self.assertIn('"corrosion inhibitor"', epmc_cmp_inh)
         self.assertNotIn('"Tafel extrapolation"', epmc_cmp_inh)
+
+        epmc_solvent = epmc.build_europepmc_query(["solvent"])
+        self.assertIn('"non-aqueous"', epmc_solvent)
+        self.assertIn('"semi-aqueous"', epmc_solvent)
+        self.assertNotIn('"chemical mechanical"', epmc_solvent)
 
         # CLI parser supports both `Cu Co --search-mode cmp_etch inhibitor --append`
         # and `--search-mode cmp_etch inhibitor Cu Co --append`
@@ -424,6 +453,11 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
         m2, modes2 = run_all.resolve_cli_metals_and_modes(a2.metals, a2.search_mode, config)
         self.assertEqual(m2, ["Cu", "Co"])
         self.assertEqual(modes2, ["cmp_etch", "inhibitor"])
+
+        a_sol = parser.parse_args(["Cu", "--search-mode", "solvent", "--append"])
+        m_sol, modes_sol = run_all.resolve_cli_metals_and_modes(a_sol.metals, a_sol.search_mode, config)
+        self.assertEqual(m_sol, ["Cu"])
+        self.assertEqual(modes_sol, ["solvent"])
 
         a3 = parser.parse_args(["Cu", "--from-step", "2", "--to-step", "3", "--retry-failed"])
         self.assertEqual(a3.from_step, 2)

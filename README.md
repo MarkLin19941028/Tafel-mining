@@ -105,7 +105,7 @@ flowchart LR
 | **正式跑完所有預設金屬** | `python run_all.py` | 依 `user_settings.py` 的 `METALS_TO_RUN` 跑完所有金屬與合併強化 |
 | **已抓過文獻，只想從中途步驟重跑** | `python run_all.py --from-step 5`<br>`python run_all.py --from-step 6`<br>`python run_all.py --from-step 7` | 跳過耗時的搜尋與下載（支援 `1`~`7`，亦可搭配金屬名稱）：<br>• `5`：重跑參數萃取 + 合併 + 強化<br>• `6`：只重跑跨金屬合併 + 強化<br>• `7`：只重跑 MP / Pourbaix 特徵強化 |
 | **只跑指定的局部步驟區間** | `python run_all.py Cu --from-step 2 --to-step 3`<br>`python run_all.py Cu Co --from-step 1 --to-step 3` | 同時指定 `--from-step` 與 `--to-step`（支援 `1`~`7`），可精準只跑其中幾個步驟（例如只跑 Step 2+3，不跑後續 Step 4~7） |
-| **保留舊資料，補抓其他主題文獻** | `python run_all.py Cu --search-mode cmp_etch inhibitor --append` | `--search-mode` 可多選（`corrosion`、`cmp_etch`、`inhibitor`、`catalysis`、`all`），搭配 `--append` 統一搜尋 OpenAlex / S2 / Europe PMC 並依 DOI / PMCID 去重合併，Step 2/3 只處理新增論文 |
+| **保留舊資料，補抓其他主題文獻** | `python run_all.py Cu --search-mode cmp_etch inhibitor --append` | `--search-mode` 可多選（`corrosion`、`cmp_etch`、`inhibitor`、`solvent`、`catalysis`、`all`），搭配 `--append` 統一搜尋 OpenAlex / S2 / Europe PMC 並依 DOI / PMCID 去重合併，Step 2/3 只處理新增論文 |
 | **重試先前下載失敗的論文** | `python run_all.py Cu --from-step 3 --to-step 3 --retry-failed`<br>`python run_all.py Cu --from-step 3 --retry-failed` | Step 3 預設會依 `<metal>_download_state.json` 自動略過已下載與先前失敗的論文；換網路環境或想重新補抓失敗清單時加上 `--retry-failed` |
 | **忽略快取，從頭強制重抓某金屬** | `python run_all.py Cu --force` | 忽略 Step 1/2 斷點續跑設定，重新查詢 API 並覆寫舊清單 |
 | **查看支援金屬／驗證自訂資料庫** | `python run_all.py --list`<br>`python run_all.py --check-db` | `--list` 查看可用金屬清單；編輯 JSON 新增金屬後請跑 `--check-db` 檢查格式 |
@@ -159,7 +159,7 @@ flowchart LR
 - **`user_settings.py`**：**所有日常可自定義參數的唯一入口**，常用調整項目：
   - `MAILTO`：OpenAlex / Unpaywall 聯絡 Email。
   - `METALS_TO_RUN`：預設批次執行的金屬清單（目前支援 13 種：`Cu, Co, W, Ru, Ti, TiN, TaN, WN, MoN, Al, Ta, Mn, Mo`）。
-  - `SEARCH_MODES`：可自由多選組合 4 種正交搜尋模組——`corrosion`（一般腐蝕）、`cmp_etch`（CMP／濕蝕刻）、`inhibitor`（多樣化緩蝕劑）、`catalysis`（電催化）；預設啟用前 3 項。執行 `run_all.py` 時亦可用 `--search-mode cmp_etch inhibitor` 臨時組合覆蓋。
+  - `SEARCH_MODES`：可自由多選組合 5 種正交搜尋模組——`corrosion`（一般腐蝕）、`cmp_etch`（CMP／濕蝕刻）、`inhibitor`（多樣化緩蝕劑）、`solvent`（非水／有機／半水／混合溶劑）、`catalysis`（電催化）；預設啟用前 3 項。執行 `run_all.py` 時亦可用 `--search-mode cmp_etch inhibitor` 或 `--search-mode solvent` 臨時組合覆蓋。
   - `MAX_RECORDS_PER_QUERY`：每組關鍵字抓取上限（測試建議 `50`，正式建議 `200`~`300`）。
   - `SKIP_EXISTING_STEP1` / `SKIP_EXISTING_STEP2`：是否啟用斷點續跑。
   - `ENABLE_SEMANTIC_SCHOLAR` / `ENABLE_EUROPEPMC_XML` / `ENABLE_MP_API`：外部資料源開關。

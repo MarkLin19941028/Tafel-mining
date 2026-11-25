@@ -253,7 +253,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         metavar="MODE",
         default=None,
         help=(
-            "臨時指定一或多種搜尋模式（可多選組合：corrosion, cmp_etch, inhibitor, catalysis, all），"
+            "臨時指定一或多種搜尋模式（可多選組合：corrosion, cmp_etch, inhibitor, solvent, catalysis, all），"
             "例如：--search-mode cmp_etch inhibitor"
         ),
     )
