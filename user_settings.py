@@ -26,8 +26,17 @@ STEP1_EARLY_STOP_EMPTY_PAGES: int = 2    # 連續幾頁無新論文即提前結�
 #    測試建議 50，正式建議 200~300（稀缺材料可調至 500）
 MAX_RECORDS_PER_QUERY: int = 300
 
-# ✏️ Step 3 下載 PDF 時每篇間隔秒數（避免觸發出版社防爬蟲封鎖）
+# ✏️ Step 2 Unpaywall 最佳化設定
+#    True = 若 OpenAlex / Semantic Scholar 已有 PDF URL 則跳過 Unpaywall（實測 99.8% 重複，可加速 20~50 倍）
+STEP2_SKIP_UNPAYWALL_IF_HAS_PDF: bool = True
+STEP2_UNPAYWALL_DELAY: float = 0.2       # Unpaywall 查詢間隔秒數（Polite Pool 額度充足）
+STEP2_CHECKPOINT_EVERY: int = 200        # Step 2 每查詢幾筆自動原子存檔一次（防中斷重跑）
+
+# ✏️ Step 3 下載 PDF 時同一網域（domain）的最小間隔秒數（避免觸發出版社防爬蟲封鎖）
 DOWNLOAD_DELAY: float = 2.0
+STEP3_MAX_WORKERS: int = 4               # Step 3 跨網域並行下載執行緒數（同網域仍嚴格遵守 DOWNLOAD_DELAY）
+STEP3_DOMAIN_403_THRESHOLD: int = 15     # 同批次單一網域連續 403 達此門檻即熔斷跳過，改走其他候選或 Europe PMC
+STEP3_MAX_PDF_MB: int = 50               # 單一 PDF 檔案大小上限 (MB)，避免卡死於異常大檔
 
 # ✏️ HTTP API 請求逾時秒數
 REQUEST_TIMEOUT: int = 30
@@ -51,7 +60,7 @@ SEARCH_MODES: list[str] = [
     "cmp_etch",
     "inhibitor",
     "solvent",
-    "catalysis",
+    # "catalysis",  # 電催化（HER/OER/ORR/CO2RR）在 Step 5 主表會被剔除；有需要可用 --search-mode catalysis 臨時開啟
 ]
 
 
@@ -64,7 +73,7 @@ ENABLE_SEMANTIC_SCHOLAR: bool = True
 SEMANTIC_SCHOLAR_USE_BULK: bool = True          # 建議維持 True：依選取模式濃縮為少數高密度布林查詢走 /search/bulk
 SEMANTIC_SCHOLAR_MAX_PER_QUERY: int = 1000      # 建議 800~1000（/search/bulk 單次上限為 1,000）
 SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY: int = 15   # 僅在 USE_BULK=False 且無 Key 時生效的查詢組數上限
-SEMANTIC_SCHOLAR_DELAY: float = 3.0             # 請求間最小間隔秒數（遇 429 會自動 AIMD 動態拉長）
+SEMANTIC_SCHOLAR_DELAY: float = 1.2             # 請求間最小間隔秒數（已設 API Key 適用 1.2s；遇 429 會自動 AIMD 動態拉長）
 
 # ✏️ Europe PMC 開放全文 XML（免 API Key、零 403 封鎖，可直接取得原生結構化表格）
 ENABLE_EUROPEPMC_XML: bool = True

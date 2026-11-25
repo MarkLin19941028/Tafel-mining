@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 import requests
@@ -32,6 +33,16 @@ from record_keys import make_record_key
 
 EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 EPMC_XML_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+_ORIG_REQUESTS_GET = requests.get
+_THREAD_LOCAL = threading.local()
+
+
+def _get_epmc_session() -> requests.Session:
+    sess = getattr(_THREAD_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        _THREAD_LOCAL.session = sess
+    return sess
 
 _EPMC_MODE_CLAUSES: dict[str, str] = {
     "corrosion": (
@@ -159,13 +170,45 @@ def parse_jats_xml(xml_text: str) -> tuple[str, list[list[list[str]]]]:
     return plain_text, tables
 
 
+def _epmc_get_with_retry(
+    url: str,
+    *,
+    params: dict | None = None,
+    timeout: int = REQUEST_TIMEOUT,
+    max_retries: int = 3,
+) -> requests.Response | None:
+    """具備 429 / 5xx / 網路瞬斷退避重試的 Europe PMC GET 請求。"""
+    for attempt in range(max_retries):
+        try:
+            getter = _get_epmc_session().get if requests.get is _ORIG_REQUESTS_GET else requests.get
+            resp = getter(url, params=params, timeout=timeout)
+            status = getattr(resp, "status_code", None)
+            if isinstance(status, int):
+                if status == 429:
+                    wait = 5 * (attempt + 1)
+                    print(f"  [Europe PMC] 429 rate limit, waiting {wait}s ...")
+                    time.sleep(wait)
+                    continue
+                if 500 <= status < 600:
+                    wait = 3 * (attempt + 1)
+                    print(f"  [Europe PMC] Server error {status}, waiting {wait}s ...")
+                    time.sleep(wait)
+                    continue
+            return resp
+        except requests.exceptions.RequestException as e:
+            wait = 3 * (attempt + 1)
+            print(f"  [Europe PMC] Request error: {e}, waiting {wait}s ...")
+            time.sleep(wait)
+    return None
+
+
 def lookup_pmcid_by_doi(doi: str) -> str | None:
     """依 DOI 查詢 Europe PMC 是否有開放全文（OPEN_ACCESS:y），有則回傳 PMCID。"""
     doi_clean = str(doi).replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
     if not doi_clean:
         return None
     try:
-        resp = requests.get(
+        resp = _epmc_get_with_retry(
             EPMC_SEARCH_URL,
             params={
                 "query": f'DOI:"{doi_clean}" AND OPEN_ACCESS:y',
@@ -175,7 +218,7 @@ def lookup_pmcid_by_doi(doi: str) -> str | None:
             },
             timeout=REQUEST_TIMEOUT,
         )
-        if resp.status_code != 200:
+        if resp is None or resp.status_code != 200:
             return None
         results = resp.json().get("resultList", {}).get("result", [])
         if results:
@@ -190,11 +233,11 @@ def fetch_fulltext_xml(pmcid: str) -> str | None:
     if not pmcid:
         return None
     try:
-        resp = requests.get(
+        resp = _epmc_get_with_retry(
             EPMC_XML_URL.format(pmcid=pmcid),
             timeout=REQUEST_TIMEOUT * 2,
         )
-        if resp.status_code == 200 and "<article" in resp.text[:500]:
+        if resp is not None and resp.status_code == 200 and "<article" in resp.text[:500]:
             return resp.text
     except Exception:
         return None
@@ -292,7 +335,7 @@ def search_europepmc_metadata(
     while new_count < limit:
         page_size = 100 if inflight else min(100, limit - new_count)
         try:
-            resp = requests.get(
+            resp = _epmc_get_with_retry(
                 EPMC_SEARCH_URL,
                 params={
                     "query": query,
@@ -303,6 +346,9 @@ def search_europepmc_metadata(
                 },
                 timeout=REQUEST_TIMEOUT,
             )
+            if resp is None:
+                print("  ⚠️ Europe PMC search failed after retries.")
+                break
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:

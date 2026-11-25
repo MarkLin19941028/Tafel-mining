@@ -63,18 +63,21 @@ def _load_s2_cache() -> dict[str, Any]:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 data.setdefault("queries", {})
+                data.setdefault("query_tokens", {})
                 data.setdefault("pdf_batch", {})
                 return data
         except Exception:
             pass
-    return {"queries": {}, "pdf_batch": {}}
+    return {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
 
 
 def _save_s2_cache(cache: dict[str, Any]) -> None:
     path = _get_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
     except Exception:
         pass
 
@@ -433,6 +436,8 @@ def _fetch_query_bulk(
     max_bulk_pages: int = 2,
     early_stop_empty_pages: int | None = None,
     return_raw: bool = False,
+    start_token: str | None = None,
+    token_out: dict[str, str | None] | None = None,
 ) -> list[dict] | tuple[list[dict], list[dict], int, int] | None:
     """
     使用 /graph/v1/paper/search/bulk 單次取回最多 1,000 筆結果（依引用數排序）：
@@ -455,7 +460,7 @@ def _fetch_query_bulk(
     selected_backfill: list[dict] = []
     total_skipped = 0
     empty_pages = 0
-    token: str | None = None
+    token: str | None = start_token
 
     for page_idx in range(page_cap):
         params = {
@@ -476,6 +481,7 @@ def _fetch_query_bulk(
         payload = resp.json()
         items = payload.get("data") or []
         if not items:
+            token = None
             break
 
         page_raw = _parse_s2_items(items, query_str, max_per_query=None)
@@ -492,6 +498,8 @@ def _fetch_query_bulk(
         selected_backfill.extend(page_bf)
         total_skipped += page_skip
 
+        token = payload.get("token")
+
         if len(selected_new) >= max_per_query:
             break
 
@@ -499,9 +507,11 @@ def _fetch_query_bulk(
         if known_keys is not None and early_stop > 0 and empty_pages >= early_stop:
             break
 
-        token = payload.get("token")
         if not token:
             break
+
+    if token_out is not None:
+        token_out["next_token"] = token
 
     combined = selected_new + selected_backfill
     if return_raw:
@@ -605,6 +615,25 @@ def _fetch_query_standard(
     return combined
 
 
+def _update_s2_query_cache(
+    cache: dict[str, Any],
+    cache_key: str,
+    raw_recs: list[dict],
+    *,
+    use_bulk: bool,
+    next_token: str | None,
+) -> None:
+    query_cache = cache.setdefault("queries", {})
+    query_tokens = cache.setdefault("query_tokens", {})
+    query_cache[cache_key] = raw_recs
+    if use_bulk:
+        if next_token:
+            query_tokens[cache_key] = next_token
+        else:
+            query_tokens.pop(cache_key, None)
+    _save_s2_cache(cache)
+
+
 def search_semantic_scholar(
     queries: list[str],
     max_per_query: int | None = None,
@@ -612,6 +641,7 @@ def search_semantic_scholar(
     use_cache: bool | None = None,
     known_keys: set[str] | None = None,
     needs_backfill: dict[str, set[str]] | None = None,
+    append: bool | None = None,
 ) -> list[dict]:
     """
     使用 Semantic Scholar Academic Graph API 檢索論文，
@@ -619,6 +649,8 @@ def search_semantic_scholar(
     """
     max_per_query = max_per_query or SEMANTIC_SCHOLAR_MAX_PER_QUERY
     from_year = from_year or FROM_YEAR
+    if append is None:
+        append = os.environ.get("TAFEL_APPEND") == "1"
     use_bulk = bool(getattr(config, "SEMANTIC_SCHOLAR_USE_BULK", True)) and len(queries) > 1
     if use_cache is None:
         # 當執行完整 pipeline (len(queries) > 1) 且未設定強制刷快取時啟用本地快取
@@ -634,8 +666,9 @@ def search_semantic_scholar(
     endpoint_mode = "Bulk Boolean (/search/bulk)" if use_bulk else "Standard (/search)"
     print(f"\n[Semantic Scholar] 開始搜尋（{len(selected_queries)} 組查詢，{endpoint_mode}，{key_status}）")
 
-    cache = _load_s2_cache() if use_cache else {"queries": {}, "pdf_batch": {}}
+    cache = _load_s2_cache() if use_cache else {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
     query_cache: dict[str, list[dict]] = cache.get("queries", {})
+    query_tokens: dict[str, str] = cache.setdefault("query_tokens", {})
     cache_hits = 0
 
     all_records: list[dict] = []
@@ -667,9 +700,45 @@ def search_semantic_scholar(
             total_new += len(new_recs)
             total_skipped += skipped
             cache_hits += 1
+
+            # 增量模式（--append）下，若既有快取已全數重複但仍有下一頁 token，自動往後翻 1 頁挖掘新論文
+            saved_token = query_tokens.get(raw_cache_key)
+            if (
+                use_bulk
+                and known_keys is not None
+                and len(new_recs) == 0
+                and saved_token
+                and append
+            ):
+                tok_box: dict[str, str | None] = {}
+                ext_res = _fetch_query_bulk(
+                    q,
+                    max_per_query,
+                    from_year,
+                    known_keys=known_keys,
+                    needs_backfill=needs_backfill,
+                    max_bulk_pages=1,
+                    return_raw=True,
+                    start_token=saved_token,
+                    token_out=tok_box,
+                )
+                if ext_res is not None:
+                    ext_recs, ext_raw, ext_new, ext_skip = ext_res
+                    all_records.extend(ext_recs)
+                    total_new += ext_new
+                    total_skipped += ext_skip
+                    merged_raw = [*cached_raw, *ext_raw] if ext_raw else cached_raw
+                    _update_s2_query_cache(
+                        cache,
+                        raw_cache_key,
+                        merged_raw,
+                        use_bulk=True,
+                        next_token=tok_box.get("next_token"),
+                    )
             continue
 
         degraded_from_bulk = False
+        tok_box = {}
         if use_bulk:
             res = _fetch_query_bulk(
                 q,
@@ -679,6 +748,7 @@ def search_semantic_scholar(
                 needs_backfill=needs_backfill,
                 max_bulk_pages=max_bulk_pages,
                 return_raw=True,
+                token_out=tok_box,
             )
             # 若 bulk 意外無回應，降級嘗試一次標準 search（不覆寫 bulk_raw 快取）
             if res is None:
@@ -715,9 +785,13 @@ def search_semantic_scholar(
             total_new += q_new
             total_skipped += q_skip
             if use_cache and not degraded_from_bulk:
-                query_cache[raw_cache_key] = raw_recs
-                cache["queries"] = query_cache
-                _save_s2_cache(cache)
+                _update_s2_query_cache(
+                    cache,
+                    raw_cache_key,
+                    raw_recs,
+                    use_bulk=use_bulk,
+                    next_token=tok_box.get("next_token"),
+                )
 
     # 內部先依 DOI 去重回報統計
     unique_dois = {r["doi"].lower() for r in all_records if r.get("doi")}

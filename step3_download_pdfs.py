@@ -3,14 +3,19 @@ Step 3: 下載 OA PDF 與 Europe PMC 開放全文 XML
 - 統一讀取 Step 2 清單（整合 OpenAlex / Semantic Scholar / Europe PMC）
 - 持久化下載狀態表（<metal>_download_state.json），支援零網路離線初始化與斷點續跑
 - 進入下載前即過濾已完成與先前失敗的論文，進度條只處理真正待下載的新論文
+- 按網域（domain）獨立節流 + 低併發執行緒池 + 單網域連續 403 熔斷器
+- PDF 串流即時驗證（Content-Type、首塊 %PDF、大檔上限），避免浪費頻寬下載無效網頁
 - 支援 --retry-failed 重試先前失敗的論文
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
 import os
+import threading
 import time
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -27,6 +32,9 @@ from config import (
     REQUEST_TIMEOUT,
     REQUIRE_TARGET_IN_TITLE_ABSTRACT,
     STEP2_OUTPUT,
+    STEP3_DOMAIN_403_THRESHOLD,
+    STEP3_MAX_PDF_MB,
+    STEP3_MAX_WORKERS,
     TEXT_DIR,
     build_target_regex,
 )
@@ -63,6 +71,82 @@ STATUS_FAILED_LEGACY = "failed_legacy"
 
 DONE_STATUSES = frozenset({STATUS_DONE_PDF, STATUS_DONE_EPMC, STATUS_DONE_TXT})
 FAILED_STATUSES = frozenset({STATUS_FAILED, STATUS_FAILED_LEGACY})
+
+_THREAD_LOCAL = threading.local()
+
+
+def _get_thread_session() -> requests.Session:
+    sess = getattr(_THREAD_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        _THREAD_LOCAL.session = sess
+    return sess
+
+
+def _extract_host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+class DomainRateLimiter:
+    """執行緒安全的按網域速率節流器：同網域嚴格間隔 delay 秒，不同網域互不阻塞。"""
+
+    def __init__(self, delay: float):
+        self.delay = max(0.0, float(delay))
+        self._lock = threading.Lock()
+        self._next_allowed: dict[str, float] = {}
+
+    def wait(self, domain: str) -> None:
+        if self.delay <= 0.0:
+            return
+        key = domain or "_default"
+        with self._lock:
+            now = time.monotonic()
+            allowed_at = self._next_allowed.get(key, now)
+            sleep_for = max(0.0, allowed_at - now)
+            self._next_allowed[key] = max(now, allowed_at) + self.delay
+        if sleep_for > 0.0:
+            time.sleep(sleep_for)
+
+
+class DomainCircuitBreaker:
+    """執行緒安全的單網域連續 403 熔斷器：連續 403 達門檻後，本輪跳過該網域 PDF 請求。"""
+
+    def __init__(self, threshold: int):
+        self.threshold = max(0, int(threshold))
+        self._lock = threading.Lock()
+        self._consec_403: dict[str, int] = {}
+        self._tripped: set[str] = set()
+
+    def is_open(self, domain: str) -> bool:
+        if self.threshold <= 0 or not domain:
+            return False
+        with self._lock:
+            return domain in self._tripped
+
+    def record_403(self, domain: str) -> bool:
+        """記錄一次 403；若剛觸發熔斷則回傳 True。"""
+        if self.threshold <= 0 or not domain:
+            return False
+        with self._lock:
+            cnt = self._consec_403.get(domain, 0) + 1
+            self._consec_403[domain] = cnt
+            if cnt >= self.threshold and domain not in self._tripped:
+                self._tripped.add(domain)
+                return True
+            return False
+
+    def record_success(self, domain: str) -> None:
+        if not domain:
+            return
+        with self._lock:
+            self._consec_403[domain] = 0
+
+    def tripped_domains(self) -> list[str]:
+        with self._lock:
+            return sorted(self._tripped)
 
 
 def _now_iso() -> str:
@@ -273,48 +357,77 @@ def select_pending_rows(
     return pending, stats
 
 
-def download_pdf(url: str, save_path: str) -> tuple[bool, str]:
+def download_pdf(
+    url: str,
+    save_path: str,
+    *,
+    max_pdf_mb: int | None = None,
+    session: requests.Session | None = None,
+) -> tuple[bool, str]:
     """
-    下載 PDF 檔案並驗證檔頭是否為有效 PDF。
+    下載 PDF 檔案並於串流階段即時驗證：
+    - 拒絕明確為 text/html 的回應
+    - 讀取首塊即檢查 %PDF 檔頭
+    - 限制單檔上限（STEP3_MAX_PDF_MB）與最小有效大小（10 KB）
     回傳 (成功與否, 狀態/失敗原因訊息)
     """
     if not url or not str(url).startswith("http"):
         return False, "無效的 URL"
 
+    size_limit_mb = STEP3_MAX_PDF_MB if max_pdf_mb is None else max_pdf_mb
+    max_bytes = max(1, int(size_limit_mb)) * 1024 * 1024
+    client = session if session is not None else _get_thread_session()
+
     try:
-        resp = requests.get(
+        with client.get(
             url,
             headers=DEFAULT_HEADERS,
             timeout=REQUEST_TIMEOUT * 2,
             stream=True,
             allow_redirects=True,
-        )
+        ) as resp:
+            if resp.status_code == 403:
+                return False, "403 Forbidden（出版社設有防爬蟲/訂閱限制）"
+            if resp.status_code == 404:
+                return False, "404 Not Found（PDF 連結已失效）"
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code}"
 
-        if resp.status_code == 403:
-            return False, "403 Forbidden（出版社設有防爬蟲/訂閱限制）"
-        elif resp.status_code == 404:
-            return False, "404 Not Found（PDF 連結已失效）"
-        elif resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}"
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "text/html" in ctype and "pdf" not in ctype and "octet-stream" not in ctype:
+                return False, "檔案內容為 HTML 網頁而非 PDF（出版社要求登入或跳轉）"
 
-        # 分塊寫入檔案
-        with open(save_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=16384):
-                if chunk:
+            content_len = resp.headers.get("Content-Length")
+            if content_len and content_len.isdigit() and int(content_len) > max_bytes:
+                return False, f"檔案超過上限 ({size_limit_mb} MB)"
+
+            written = 0
+            checked_header = False
+            abort_reason: str | None = None
+            with open(save_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=16384):
+                    if not chunk:
+                        continue
+                    if not checked_header:
+                        checked_header = True
+                        if not chunk.startswith(b"%PDF"):
+                            abort_reason = "檔案內容為 HTML 網頁而非 PDF（出版社要求登入或跳轉）"
+                            break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        abort_reason = f"檔案超過上限 ({size_limit_mb} MB)"
+                        break
                     f.write(chunk)
 
-        # 檢查檔案大小
-        file_size = os.path.getsize(save_path)
-        if file_size < 10_000:
-            os.remove(save_path)
-            return False, f"檔案過小 ({file_size} bytes)，非有效 PDF"
+        if abort_reason is not None:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return False, abort_reason
 
-        # 檢查前 5 個 bytes 是否為 %PDF
-        with open(save_path, "rb") as f:
-            first_bytes = f.read(5)
-        if not first_bytes.startswith(b"%PDF"):
-            os.remove(save_path)
-            return False, "檔案內容為 HTML 網頁而非 PDF（出版社要求登入或跳轉）"
+        if written < 10_000:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return False, f"檔案過小 ({written} bytes)，非有效 PDF"
 
         return True, "成功"
 
@@ -396,9 +509,11 @@ def run_download(retry_failed: bool | None = None):
         extra_note += f" | --retry-failed 重試: {qstats['retry_forced']}"
     if qstats["retry_new_source"]:
         extra_note += f" | 補到新來源重試: {qstats['retry_new_source']}"
+    workers = max(1, int(STEP3_MAX_WORKERS))
     print(
         f"[Step 3 Queue] 總候選: {qstats['total']} | 已下載略過: {qstats['skipped_done']} "
-        f"| 先前失敗略過: {qstats['skipped_failed']} | 本次待下載: {len(pending_rows)}{extra_note}"
+        f"| 先前失敗略過: {qstats['skipped_failed']} | 本次待下載: {len(pending_rows)}"
+        f" (workers={workers}, domain_delay={DOWNLOAD_DELAY}s, 403_breaker={STEP3_DOMAIN_403_THRESHOLD}){extra_note}"
     )
 
     if not pending_rows:
@@ -406,95 +521,163 @@ def run_download(retry_failed: bool | None = None):
         print("✨ 沒有新的待下載論文（若需重試先前失敗的論文，請加上 --retry-failed）。")
         return
 
+    pdf_limiter = DomainRateLimiter(DOWNLOAD_DELAY)
+    epmc_limiter = DomainRateLimiter(EUROPEPMC_DELAY)
+    breaker = DomainCircuitBreaker(STEP3_DOMAIN_403_THRESHOLD)
+    state_lock = threading.Lock()
+
     success = 0
     epmc_direct = 0
     epmc_rescued = 0
     fail = 0
     fail_reasons: dict[str, int] = {}
 
-    try:
-        for idx, item in enumerate(
-            tqdm(pending_rows, total=len(pending_rows), desc="Downloading papers"),
-            start=1,
-        ):
-            key = item["key"]
-            doi = item["doi"]
-            pmcid = item["pmcid"]
-            base_name = item["base_name"]
-            save_path = item["save_path"]
-            epmc_marker = item["epmc_marker"]
-            candidate_urls = item["candidate_urls"]
+    def _process_one(item: dict) -> tuple[str, dict, str, str | None]:
+        key = item["key"]
+        doi = item["doi"]
+        pmcid = item["pmcid"]
+        base_name = item["base_name"]
+        save_path = item["save_path"]
+        epmc_marker = item["epmc_marker"]
+        candidate_urls = item["candidate_urls"]
 
+        with state_lock:
             prev_entry = state.get(key) or {}
-            merged_urls = list(dict.fromkeys([*(prev_entry.get("urls") or []), *candidate_urls]))
+            prev_urls = list(prev_entry.get("urls") or [])
+        merged_urls = list(dict.fromkeys([*prev_urls, *candidate_urls]))
 
-            # 1. 若已有 Europe PMC PMCID，優先直接抓取開放全文 JATS XML（零 403、含結構化表格）
-            done_via_epmc = False
-            if pmcid and ENABLE_EUROPEPMC_XML:
-                xml_text = fetch_fulltext_xml(pmcid)
-                if xml_text:
-                    w_txt, u_tbl, _ = save_xml_to_texts(xml_text, base_name, TEXT_DIR)
-                    if w_txt or u_tbl:
-                        _write_epmc_marker(epmc_marker, pmcid)
-                        state[key] = _make_state_entry(
-                            STATUS_DONE_EPMC, "Europe PMC XML 成功", merged_urls, pmcid
-                        )
-                        epmc_direct += 1
-                        done_via_epmc = True
-                        time.sleep(EUROPEPMC_DELAY)
+        # 1. 若已有 Europe PMC PMCID，優先直接抓取開放全文 JATS XML（零 403、含結構化表格）
+        if pmcid and ENABLE_EUROPEPMC_XML:
+            epmc_limiter.wait("europepmc.org")
+            xml_text = fetch_fulltext_xml(pmcid)
+            if xml_text:
+                w_txt, u_tbl, _ = save_xml_to_texts(xml_text, base_name, TEXT_DIR)
+                if w_txt or u_tbl:
+                    _write_epmc_marker(epmc_marker, pmcid)
+                    return (
+                        key,
+                        _make_state_entry(STATUS_DONE_EPMC, "Europe PMC XML 成功", merged_urls, pmcid),
+                        "epmc_direct",
+                        None,
+                    )
 
-            if done_via_epmc:
-                if idx % 20 == 0:
-                    save_download_state(DOWNLOAD_STATE_PATH, state)
+        # 2. 依序嘗試候選 PDF URL（按網域節流 + 連續 403 熔斷）
+        downloaded = False
+        last_reason = "無有效 PDF 連結" if not candidate_urls else "下載失敗"
+        for url in candidate_urls:
+            host = _extract_host(url)
+            if breaker.is_open(host):
+                last_reason = f"網域已觸發 403 熔斷略過 ({host})"
                 continue
 
-            # 2. 依序嘗試候選 PDF URL
-            downloaded = False
-            last_reason = "無有效 PDF 連結" if not candidate_urls else "下載失敗"
-            for url in candidate_urls:
-                ok, reason = download_pdf(url, save_path)
-                if ok:
-                    downloaded = True
-                    break
-                last_reason = reason
-
-            if downloaded:
-                state[key] = _make_state_entry(STATUS_DONE_PDF, "PDF 下載成功", merged_urls, pmcid)
-                success += 1
-            elif ENABLE_EUROPEPMC_XML and doi and not pmcid:
-                rescued, _ = try_fallback_from_europepmc(doi, base_name, TEXT_DIR)
-                if rescued:
-                    _write_epmc_marker(epmc_marker, "fallback")
-                    state[key] = _make_state_entry(
-                        STATUS_DONE_EPMC, "Europe PMC XML 補救成功", merged_urls, None
+            pdf_limiter.wait(host)
+            ok, reason = download_pdf(url, save_path)
+            if ok:
+                breaker.record_success(host)
+                downloaded = True
+                break
+            if reason.startswith("403"):
+                if breaker.record_403(host):
+                    print(
+                        f"\n  ⚡ [Step 3 Breaker] 網域 {host} 連續 {STEP3_DOMAIN_403_THRESHOLD} 次 403，"
+                        "本輪自動跳過該網域後續 PDF 連結。"
                     )
-                    epmc_rescued += 1
-                else:
-                    state[key] = _make_state_entry(STATUS_FAILED, last_reason, merged_urls, None)
-                    fail += 1
-                    fail_reasons[last_reason] = fail_reasons.get(last_reason, 0) + 1
-            else:
-                reason_final = (
-                    "Europe PMC XML 下載失敗且無有效 PDF 連結"
-                    if (pmcid and not candidate_urls)
-                    else last_reason
-                )
-                state[key] = _make_state_entry(STATUS_FAILED, reason_final, merged_urls, pmcid)
-                fail += 1
-                fail_reasons[reason_final] = fail_reasons.get(reason_final, 0) + 1
+            last_reason = reason
 
-            if idx % 20 == 0:
+        if downloaded:
+            return (
+                key,
+                _make_state_entry(STATUS_DONE_PDF, "PDF 下載成功", merged_urls, pmcid),
+                "pdf",
+                None,
+            )
+
+        # 3. Europe PMC DOI fallback 補救
+        if ENABLE_EUROPEPMC_XML and doi and not pmcid:
+            epmc_limiter.wait("europepmc.org")
+            rescued, _ = try_fallback_from_europepmc(doi, base_name, TEXT_DIR)
+            if rescued:
+                _write_epmc_marker(epmc_marker, "fallback")
+                return (
+                    key,
+                    _make_state_entry(STATUS_DONE_EPMC, "Europe PMC XML 補救成功", merged_urls, None),
+                    "epmc_rescued",
+                    None,
+                )
+            return (
+                key,
+                _make_state_entry(STATUS_FAILED, last_reason, merged_urls, None),
+                "fail",
+                last_reason,
+            )
+
+        reason_final = (
+            "Europe PMC XML 下載失敗且無有效 PDF 連結"
+            if (pmcid and not candidate_urls)
+            else last_reason
+        )
+        return (
+            key,
+            _make_state_entry(STATUS_FAILED, reason_final, merged_urls, pmcid),
+            "fail",
+            reason_final,
+        )
+
+    def _record_result(res: tuple[str, dict, str, str | None], completed_idx: int) -> None:
+        nonlocal success, epmc_direct, epmc_rescued, fail
+        key, entry, outcome, reason = res
+        with state_lock:
+            state[key] = entry
+            if outcome == "pdf":
+                success += 1
+            elif outcome == "epmc_direct":
+                epmc_direct += 1
+            elif outcome == "epmc_rescued":
+                epmc_rescued += 1
+            else:
+                fail += 1
+                if reason:
+                    fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+            if completed_idx % 20 == 0:
                 save_download_state(DOWNLOAD_STATE_PATH, state)
 
-            time.sleep(DOWNLOAD_DELAY)
+    try:
+        if workers == 1:
+            for idx, item in enumerate(
+                tqdm(pending_rows, total=len(pending_rows), desc="Downloading papers"),
+                start=1,
+            ):
+                _record_result(_process_one(item), idx)
+        else:
+            pool = ThreadPoolExecutor(max_workers=workers)
+            interrupted = False
+            try:
+                futures = [pool.submit(_process_one, item) for item in pending_rows]
+                for idx, fut in enumerate(
+                    tqdm(as_completed(futures), total=len(futures), desc="Downloading papers"),
+                    start=1,
+                ):
+                    _record_result(fut.result(), idx)
+            except KeyboardInterrupt:
+                interrupted = True
+                print("\n⚠️  [Step 3] 收到中斷訊號，取消尚未執行的下載任務並立即保存狀態...")
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                if not interrupted:
+                    pool.shutdown(wait=True)
     finally:
-        save_download_state(DOWNLOAD_STATE_PATH, state)
+        with state_lock:
+            save_download_state(DOWNLOAD_STATE_PATH, state)
 
     print(
         f"\n下載統計：✅ PDF 成功: {success}, 🧬 Europe PMC XML 直接: {epmc_direct}, "
         f"🧬 Europe PMC 補救: {epmc_rescued}, ⏩ 已下載略過: {qstats['skipped_done']}, "
         f"⏭️ 先前失敗略過: {qstats['skipped_failed']}, ❌ 本次失敗: {fail}"
     )
+    tripped = breaker.tripped_domains()
+    if tripped:
+        print(f"⚡ 本輪觸發 403 熔斷網域（{len(tripped)} 個）：{', '.join(tripped)}")
     if fail_reasons:
         print("\n失敗原因分佈：")
         for reason, count in sorted(fail_reasons.items(), key=lambda x: -x[1]):

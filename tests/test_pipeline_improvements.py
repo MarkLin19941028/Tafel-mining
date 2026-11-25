@@ -382,8 +382,8 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
         import semantic_scholar_fetcher as s2f
         import user_settings
 
-        # user_settings exports default 3 orthogonal modes
-        self.assertEqual(user_settings.SEARCH_MODES, ["corrosion", "cmp_etch", "inhibitor"])
+        # user_settings exports default 4 corrosion-focused modes (catalysis excluded by default)
+        self.assertEqual(user_settings.SEARCH_MODES, ["corrosion", "cmp_etch", "inhibitor", "solvent"])
         self.assertEqual(config.MAILTO, user_settings.MAILTO)
 
         # parse_search_modes handles lists, space/comma strings, 'all', and rejects unknown modes
@@ -930,6 +930,396 @@ class TestStep1InflightDedup(unittest.TestCase):
             )
         self.assertEqual(recs_empty, [])
         self.assertEqual(mock_get2.call_count, 2)
+
+
+class TestStep1To3Optimizations(unittest.TestCase):
+    def test_step1_relevance_prefilter_and_interrupt_save(self):
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        import config
+        import step1_search_openalex as s1
+
+        def _oa_item(oid, doi, title, abstract_words=None):
+            inv = {w: [i] for i, w in enumerate(abstract_words)} if abstract_words else None
+            return {
+                "id": oid,
+                "doi": doi,
+                "title": title,
+                "publication_year": 2024,
+                "primary_location": {"source": {"display_name": "J. Electrochem."}, "pdf_url": None},
+                "best_oa_location": {"pdf_url": "https://ex.org/p.pdf"},
+                "open_access": {"is_oa": True, "oa_status": "gold", "oa_url": "https://ex.org/p.pdf"},
+                "abstract_inverted_index": inv,
+                "cited_by_count": 5,
+                "authorships": [{"author": {"display_name": "Alice"}}],
+            }
+
+        page = {
+            "results": [
+                # Has both title and abstract, neither mentions Cu/copper -> filtered out
+                _oa_item("W1", "https://doi.org/10.1000/irrel", "Steel corrosion study", ["Iron", "acid"]),
+                # Mentions copper in abstract -> kept
+                _oa_item("W2", "https://doi.org/10.1000/rel", "Corrosion study", ["Copper", "Tafel"]),
+                # Missing abstract -> preserved (not falsely dropped)
+                _oa_item("W3", "https://doi.org/10.1000/noabs", "Polarization study", None),
+            ],
+            "meta": {"next_cursor": None},
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = page
+        pat = config.build_target_regex("copper", "Cu", ["CuO"])
+
+        with patch.object(s1, "request_with_retry", return_value=mock_resp), \
+             patch.object(s1.time, "sleep"):
+            recs = s1.fetch_single_query(
+                '"copper" "Tafel"',
+                max_records=5,
+                known_keys=set(),
+                needs_backfill={},
+                target_pat=pat,
+            )
+        self.assertEqual([r["doi"] for r in recs], [
+            "https://doi.org/10.1000/rel",
+            "https://doi.org/10.1000/noabs",
+        ])
+
+        # Verify partial results are saved atomically when RuntimeError occurs mid-run
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_csv = os.path.join(tmpdir, "cu_meta.csv")
+            calls = [0]
+
+            def _fake_fetch(*args, **kwargs):
+                calls[0] += 1
+                if calls[0] == 1:
+                    return [{
+                        "query": "q1",
+                        "openalex_id": "W2",
+                        "s2_paper_id": None,
+                        "pmcid": None,
+                        "source_api": "openalex",
+                        "doi": "https://doi.org/10.1000/rel",
+                        "title": "Copper study",
+                        "year": 2024,
+                        "journal": "J",
+                        "is_oa": True,
+                        "oa_status": "gold",
+                        "oa_url": None,
+                        "best_pdf_url": "https://ex.org/p.pdf",
+                        "primary_pdf_url": None,
+                        "cited_by_count": 5,
+                        "authors": "Alice",
+                        "abstract": "Copper Tafel",
+                    }]
+                raise RuntimeError("OpenAlex quota exceeded")
+
+            with patch.object(s1, "STEP1_OUTPUT", out_csv), \
+                 patch.object(s1, "SEARCH_QUERIES", ["q1", "q2"]), \
+                 patch.object(s1, "fetch_single_query", side_effect=_fake_fetch):
+                with self.assertRaises(RuntimeError):
+                    s1.run_search(append=False)
+            self.assertTrue(os.path.exists(out_csv))
+            saved = pd.read_csv(out_csv)
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved.loc[0, "doi"], "https://doi.org/10.1000/rel")
+
+    def test_europepmc_retry_on_429_and_503(self):
+        from unittest.mock import MagicMock, patch
+        import europepmc_fetcher as epmc
+
+        r429 = MagicMock(status_code=429)
+        r503 = MagicMock(status_code=503)
+        r200 = MagicMock(status_code=200)
+        with patch.object(epmc.requests, "get", side_effect=[r429, r503, r200]) as mock_get, \
+             patch.object(epmc.time, "sleep"):
+            resp = epmc._epmc_get_with_retry("https://example.org/epmc", max_retries=3)
+        self.assertIs(resp, r200)
+        self.assertEqual(mock_get.call_count, 3)
+
+    def test_step2_skips_irrelevant_and_existing_pdf_and_runs_s2_first(self):
+        import tempfile
+        from unittest.mock import patch
+        import config
+        import step2_find_pdf_urls as s2
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s1_csv = os.path.join(tmpdir, "s1.csv")
+            s2_csv = os.path.join(tmpdir, "s2.csv")
+            pd.DataFrame([
+                # Irrelevant -> skipped for both S2 and Unpaywall
+                {"doi": "https://doi.org/10.1000/irrel", "pmcid": None, "title": "Steel corrosion", "abstract": "Iron only", "best_pdf_url": None, "primary_pdf_url": None},
+                # Relevant + already has best_pdf_url -> skipped for both S2 and Unpaywall
+                {"doi": "https://doi.org/10.1000/has_oa", "pmcid": None, "title": "Copper corrosion", "abstract": "Cu Tafel", "best_pdf_url": "https://oa.org/1.pdf", "primary_pdf_url": None},
+                # Relevant + missing PDF -> S2 Batch finds it -> skipped for Unpaywall!
+                {"doi": "https://doi.org/10.1000/s2_hit", "pmcid": None, "title": "Copper CMP", "abstract": "Cu slurry", "best_pdf_url": None, "primary_pdf_url": None},
+                # Relevant + missing PDF -> S2 misses -> queried on Unpaywall
+                {"doi": "https://doi.org/10.1000/unp_hit", "pmcid": None, "title": "CuO etching", "abstract": "Copper oxide", "best_pdf_url": None, "primary_pdf_url": None},
+            ]).to_csv(s1_csv, index=False)
+
+            unp_calls = []
+
+            def _fake_unp(doi):
+                unp_calls.append(doi)
+                return {
+                    "unpaywall_pdf_url": "https://unp.org/found.pdf",
+                    "unpaywall_landing_url": "https://unp.org/landing",
+                    "license": "cc-by",
+                    "is_oa_unpaywall": True,
+                }
+
+            def _fake_s2_batch(dois):
+                return {"10.1000/s2_hit": {"s2_pdf_url": "https://s2.org/hit.pdf", "is_oa_s2": True, "s2_paper_id": "p1"}}
+
+            with patch.object(s2, "STEP1_OUTPUT", s1_csv), \
+                 patch.object(s2, "STEP2_OUTPUT", s2_csv), \
+                 patch.object(s2, "STEP2_SKIP_UNPAYWALL_IF_HAS_PDF", True), \
+                 patch.object(s2, "STEP2_UNPAYWALL_DELAY", 0.0), \
+                 patch.object(s2, "REQUIRE_TARGET_IN_TITLE_ABSTRACT", True), \
+                 patch.object(s2, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
+                 patch.object(s2, "find_pdf_url", side_effect=_fake_unp), \
+                 patch("semantic_scholar_fetcher.batch_lookup_pdf_urls", side_effect=_fake_s2_batch) as mock_s2:
+                out_df = s2.run_find_pdfs(append=False)
+
+            # S2 Batch only received the 2 relevant missing-PDF DOIs
+            self.assertEqual(mock_s2.call_count, 1)
+            self.assertEqual(set(mock_s2.call_args[0][0]), {
+                "https://doi.org/10.1000/s2_hit",
+                "https://doi.org/10.1000/unp_hit",
+            })
+            # Unpaywall only queried the 1 DOI that S2 missed
+            self.assertEqual(unp_calls, ["https://doi.org/10.1000/unp_hit"])
+            self.assertEqual(out_df.loc[1, "final_pdf_url"], "https://oa.org/1.pdf")
+            self.assertEqual(out_df.loc[2, "final_pdf_url"], "https://s2.org/hit.pdf")
+            self.assertEqual(out_df.loc[3, "final_pdf_url"], "https://unp.org/found.pdf")
+
+    def test_step3_circuit_breaker_and_pdf_streaming_guards(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        import step3_download_pdfs as s3
+
+        # Circuit breaker trips at threshold and resets on success before threshold
+        cb = s3.DomainCircuitBreaker(threshold=3)
+        self.assertFalse(cb.record_403("mdpi.com"))
+        self.assertFalse(cb.record_403("mdpi.com"))
+        cb.record_success("mdpi.com")
+        self.assertFalse(cb.record_403("mdpi.com"))
+        self.assertFalse(cb.record_403("mdpi.com"))
+        self.assertTrue(cb.record_403("mdpi.com"))
+        self.assertTrue(cb.is_open("mdpi.com"))
+        self.assertEqual(cb.tripped_domains(), ["mdpi.com"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = os.path.join(tmpdir, "test.pdf")
+
+            # 1. HTML Content-Type rejected immediately without writing file
+            sess_html = MagicMock()
+            resp_html = MagicMock(status_code=200, headers={"Content-Type": "text/html; charset=utf-8"})
+            resp_html.__enter__.return_value = resp_html
+            sess_html.get.return_value = resp_html
+            ok, reason = s3.download_pdf("https://ex.org/login", save_path, session=sess_html)
+            self.assertFalse(ok)
+            self.assertIn("HTML", reason)
+            self.assertFalse(os.path.exists(save_path))
+
+            # 2. Non-%PDF first chunk rejected immediately
+            sess_bad = MagicMock()
+            resp_bad = MagicMock(status_code=200, headers={"Content-Type": "application/octet-stream"})
+            resp_bad.iter_content.return_value = [b"<html>blocked</html>", b"more data"]
+            resp_bad.__enter__.return_value = resp_bad
+            sess_bad.get.return_value = resp_bad
+            ok2, reason2 = s3.download_pdf("https://ex.org/fake.pdf", save_path, session=sess_bad)
+            self.assertFalse(ok2)
+            self.assertIn("HTML", reason2)
+            self.assertFalse(os.path.exists(save_path))
+
+            # 3. Oversized Content-Length rejected immediately
+            sess_big = MagicMock()
+            resp_big = MagicMock(
+                status_code=200,
+                headers={"Content-Type": "application/pdf", "Content-Length": str(10 * 1024 * 1024)},
+            )
+            resp_big.__enter__.return_value = resp_big
+            sess_big.get.return_value = resp_big
+            ok3, reason3 = s3.download_pdf("https://ex.org/huge.pdf", save_path, max_pdf_mb=2, session=sess_big)
+            self.assertFalse(ok3)
+            self.assertIn("超過上限", reason3)
+
+            # 4. Valid PDF succeeds
+            sess_ok = MagicMock()
+            resp_ok = MagicMock(status_code=200, headers={"Content-Type": "application/pdf"})
+            resp_ok.iter_content.return_value = [b"%PDF-1.7\n" + b"x" * 12000]
+            resp_ok.__enter__.return_value = resp_ok
+            sess_ok.get.return_value = resp_ok
+            ok4, _ = s3.download_pdf("https://ex.org/good.pdf", save_path, max_pdf_mb=2, session=sess_ok)
+            self.assertTrue(ok4)
+            self.assertTrue(os.path.exists(save_path))
+
+    def test_step2_checkpoint_interrupt_and_append_resume(self):
+        import tempfile
+        from unittest.mock import patch
+        import config
+        import step2_find_pdf_urls as s2
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s1_csv = os.path.join(tmpdir, "s1.csv")
+            s2_csv = os.path.join(tmpdir, "s2.csv")
+            state_json = os.path.join(tmpdir, "state.json")
+            pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/p1", "pmcid": None, "title": "Copper 1", "abstract": "Cu", "best_pdf_url": None, "primary_pdf_url": None},
+                {"doi": "https://doi.org/10.1000/p2", "pmcid": None, "title": "Copper 2", "abstract": "Cu", "best_pdf_url": None, "primary_pdf_url": None},
+                {"doi": "https://doi.org/10.1000/p3", "pmcid": None, "title": "Copper 3", "abstract": "Cu", "best_pdf_url": None, "primary_pdf_url": None},
+            ]).to_csv(s1_csv, index=False)
+
+            calls_run1 = []
+
+            def _unp_interrupt_on_second(doi):
+                calls_run1.append(doi)
+                if doi.endswith("/p2"):
+                    raise KeyboardInterrupt("simulated Ctrl+C")
+                return {
+                    "unpaywall_pdf_url": f"https://unp.org/{doi.split('/')[-1]}.pdf",
+                    "unpaywall_landing_url": None,
+                    "license": "cc-by",
+                    "is_oa_unpaywall": True,
+                }
+
+            with patch.object(s2, "STEP1_OUTPUT", s1_csv), \
+                 patch.object(s2, "STEP2_OUTPUT", s2_csv), \
+                 patch.object(s2, "DOWNLOAD_STATE_PATH", state_json), \
+                 patch.object(s2, "ENABLE_SEMANTIC_SCHOLAR", False), \
+                 patch.object(s2, "STEP2_CHECKPOINT_EVERY", 1), \
+                 patch.object(s2, "STEP2_UNPAYWALL_DELAY", 0.0), \
+                 patch.object(s2, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
+                 patch.object(s2, "find_pdf_url", side_effect=_unp_interrupt_on_second):
+                with self.assertRaises(KeyboardInterrupt):
+                    s2.run_find_pdfs(append=False)
+
+            self.assertTrue(os.path.exists(s2_csv))
+            mid_df = pd.read_csv(s2_csv)
+            self.assertTrue(bool(mid_df.loc[0, "step2_checked"]))
+            self.assertFalse(bool(mid_df.loc[1, "step2_checked"]))
+            self.assertFalse(bool(mid_df.loc[2, "step2_checked"]))
+
+            # Resuming with append=True must skip p1 and query p2 & p3
+            calls_run2 = []
+
+            def _unp_ok(doi):
+                calls_run2.append(doi)
+                return {
+                    "unpaywall_pdf_url": f"https://unp.org/{doi.split('/')[-1]}.pdf",
+                    "unpaywall_landing_url": None,
+                    "license": "cc-by",
+                    "is_oa_unpaywall": True,
+                }
+
+            with patch.object(s2, "STEP1_OUTPUT", s1_csv), \
+                 patch.object(s2, "STEP2_OUTPUT", s2_csv), \
+                 patch.object(s2, "DOWNLOAD_STATE_PATH", state_json), \
+                 patch.object(s2, "ENABLE_SEMANTIC_SCHOLAR", False), \
+                 patch.object(s2, "STEP2_UNPAYWALL_DELAY", 0.0), \
+                 patch.object(s2, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
+                 patch.object(s2, "find_pdf_url", side_effect=_unp_ok):
+                final_df = s2.run_find_pdfs(append=True)
+
+            self.assertEqual(calls_run2, [
+                "https://doi.org/10.1000/p2",
+                "https://doi.org/10.1000/p3",
+            ])
+            self.assertTrue(final_df["step2_checked"].all())
+            self.assertEqual(final_df["final_pdf_url"].notna().sum(), 3)
+
+    def test_step3_concurrent_breaker_triggers_epmc_fallback(self):
+        import tempfile
+        from unittest.mock import patch
+        import config
+        import step3_download_pdfs as s3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s2_csv = os.path.join(tmpdir, "s2.csv")
+            pdf_dir = os.path.join(tmpdir, "pdfs")
+            text_dir = os.path.join(tmpdir, "texts")
+            state_json = os.path.join(tmpdir, "state.json")
+            os.makedirs(pdf_dir)
+            os.makedirs(text_dir)
+
+            pd.DataFrame([
+                {"doi": "https://doi.org/10.1000/b1", "pmcid": None, "title": "Copper 1", "abstract": "Cu", "final_pdf_url": "https://blocked.example.com/1.pdf"},
+                {"doi": "https://doi.org/10.1000/b2", "pmcid": None, "title": "Copper 2", "abstract": "Cu", "final_pdf_url": "https://blocked.example.com/2.pdf"},
+                {"doi": "https://doi.org/10.1000/b3", "pmcid": None, "title": "Copper 3", "abstract": "Cu", "final_pdf_url": "https://blocked.example.com/3.pdf"},
+            ]).to_csv(s2_csv, index=False)
+
+            pdf_attempts = []
+
+            def _fake_download_pdf(url, save_path, **kwargs):
+                pdf_attempts.append(url)
+                return False, "403 Forbidden（出版社設有防爬蟲/訂閱限制）"
+
+            def _fake_epmc_fallback(doi, base_name, tdir):
+                if doi.endswith("/b3"):
+                    with open(os.path.join(tdir, base_name + ".txt"), "w", encoding="utf-8") as f:
+                        f.write("Copper Tafel data from EPMC fallback")
+                    return True, 1
+                return False, 0
+
+            with patch.object(s3, "STEP2_OUTPUT", s2_csv), \
+                 patch.object(s3, "PDF_DIR", pdf_dir), \
+                 patch.object(s3, "TEXT_DIR", text_dir), \
+                 patch.object(s3, "DOWNLOAD_STATE_PATH", state_json), \
+                 patch.object(s3, "DOWNLOAD_DELAY", 0.0), \
+                 patch.object(s3, "EUROPEPMC_DELAY", 0.0), \
+                 patch.object(s3, "STEP3_MAX_WORKERS", 2), \
+                 patch.object(s3, "STEP3_DOMAIN_403_THRESHOLD", 1), \
+                 patch.object(s3, "ENABLE_EUROPEPMC_XML", True), \
+                 patch.object(s3, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
+                 patch.object(s3, "download_pdf", side_effect=_fake_download_pdf), \
+                 patch("europepmc_fetcher.try_fallback_from_europepmc", side_effect=_fake_epmc_fallback):
+                s3.run_download(retry_failed=False)
+
+            with open(state_json, "r", encoding="utf-8") as f:
+                saved_state = json.load(f)
+            # b3 was rescued via Europe PMC fallback even after domain 403 breaker tripped
+            self.assertEqual(saved_state["10.1000/b3"]["status"], s3.STATUS_DONE_EPMC)
+            # At least 1 paper hit 403 and triggered breaker before all 3 could be attempted sequentially
+            self.assertLessEqual(len(pdf_attempts), 3)
+
+    def test_s2_append_param_advances_cached_bulk_token(self):
+        from unittest.mock import MagicMock, patch
+        import semantic_scholar_fetcher as s2f
+
+        def _s2_item(pid, doi):
+            return {
+                "paperId": pid,
+                "externalIds": {"DOI": doi},
+                "title": f"S2 {pid}",
+                "year": 2024,
+                "venue": "Corr. Sci.",
+                "isOpenAccess": False,
+                "openAccessPdf": None,
+                "citationCount": 10,
+                "authors": [{"name": "Bob"}],
+                "abstract": "Cu corrosion",
+            }
+
+        page1_resp = MagicMock()
+        page1_resp.json.return_value = {"data": [_s2_item("p1", "10.1000/p1")], "token": "tok_page2"}
+        page2_resp = MagicMock()
+        page2_resp.json.return_value = {"data": [_s2_item("p2", "10.1000/p2")], "token": None}
+
+        mem_cache: dict = {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
+        with patch.object(s2f, "_load_s2_cache", side_effect=lambda: mem_cache), \
+             patch.object(s2f, "_save_s2_cache", side_effect=lambda c: mem_cache.update(c)), \
+             patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
+             patch.object(s2f, "_s2_request_with_retry", side_effect=[page1_resp, page2_resp]) as mock_req:
+            # First run caches page1 + tok_page2
+            r1 = s2f.search_semantic_scholar(
+                ["q1", "q2"], max_per_query=1, from_year=2005, use_cache=True, known_keys=set(), append=False
+            )
+            self.assertEqual([r["doi"] for r in r1], ["https://doi.org/10.1000/p1"])
+            # Second run with append=True (no TAFEL_APPEND env var) advances via saved token to fetch p2!
+            r2 = s2f.search_semantic_scholar(
+                ["q1", "q2"], max_per_query=1, from_year=2005, use_cache=True, known_keys={"10.1000/p1"}, append=True
+            )
+            self.assertEqual([r["doi"] for r in r2], ["https://doi.org/10.1000/p2"])
+            self.assertEqual(mock_req.call_count, 2)
 
 
 if __name__ == "__main__":

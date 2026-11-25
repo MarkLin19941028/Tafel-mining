@@ -23,15 +23,24 @@ from config import (
     MAX_RECORDS_PER_QUERY,
     OPENALEX_API_KEY,
     REQUEST_TIMEOUT,
+    REQUIRE_TARGET_IN_TITLE_ABSTRACT,
     SEARCH_QUERIES,
     STEP1_EARLY_STOP_EMPTY_PAGES,
     STEP1_INFLIGHT_DEDUP,
     STEP1_MAX_SCAN_MULTIPLIER,
     STEP1_OUTPUT,
+    build_target_regex,
 )
-from record_keys import make_record_key, normalize_doi_key, normalize_pmcid
+from record_keys import (
+    is_title_abstract_relevant,
+    make_record_key,
+    normalize_doi_key,
+    normalize_pmcid,
+    save_csv_atomic,
+)
 
 BASE_URL = "https://api.openalex.org/works"
+_SESSION = requests.Session()
 
 
 def invert_abstract(inv_index: dict) -> str:
@@ -59,7 +68,7 @@ def request_with_retry(url, params, max_retries=5):
 
         try:
 
-            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)  # ✅ 改用 config
+            resp = _SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)  # ✅ 複用連線池
 
             if resp.status_code == 429:
 
@@ -74,7 +83,7 @@ def request_with_retry(url, params, max_retries=5):
                     hours = f"{retry_sec / 3600:.1f} 小時" if retry_sec else "UTC 午夜"
                     raise RuntimeError(
                         f"OpenAlex 每日配額已耗盡（約 {hours} 後重置）。"
-                        f"請確認 config.py 的 OPENALEX_API_KEY 已正確填入。"
+                        f"請確認專案根目錄 .env 的 OPENALEX_API_KEY 已正確填入。"
                     )
 
                 wait = retry_sec if retry_sec else (30 + attempt * 30)
@@ -209,6 +218,7 @@ def fetch_single_query(
     needs_backfill: dict[str, set[str]] | None = None,
     max_scan_multiplier: int | None = None,
     early_stop_empty_pages: int | None = None,
+    target_pat=None,
 ) -> list[dict]:
     if max_records <= 0:
         return []
@@ -224,6 +234,7 @@ def fetch_single_query(
     records: list[dict] = []
     new_count = 0
     skipped_dup = 0
+    skipped_irrel = 0
     backfill_count = 0
     pages_scanned = 0
     empty_pages = 0
@@ -281,6 +292,17 @@ def fetch_single_query(
                 continue
 
             rec = _build_openalex_record(item, search_query)
+
+            # 若同時具備標題與摘要但兩者皆未提及目標金屬，直接略過以免吃掉 MAX_RECORDS_PER_QUERY 配額
+            if not is_title_abstract_relevant(
+                rec.get("title"),
+                rec.get("abstract"),
+                target_pat,
+                require_both_present=True,
+            ):
+                skipped_irrel += 1
+                continue
+
             records.append(rec)
             new_count += 1
             page_new += 1
@@ -318,9 +340,11 @@ def fetch_single_query(
 
     if inflight:
         bf_msg = f", backfill {backfill_count}" if backfill_count else ""
-        print(f"  Found {new_count} new (skipped {skipped_dup} dup{bf_msg}, {pages_scanned} pages)")
+        irrel_msg = f", skipped {skipped_irrel} irrel" if skipped_irrel else ""
+        print(f"  Found {new_count} new (skipped {skipped_dup} dup{irrel_msg}{bf_msg}, {pages_scanned} pages)")
     else:
-        print(f"  Found {new_count} records")
+        irrel_msg = f" (skipped {skipped_irrel} irrel)" if skipped_irrel else ""
+        print(f"  Found {new_count} records{irrel_msg}")
 
     return records
 
@@ -481,17 +505,24 @@ def run_search(append: bool | None = None):
             f"（護欄：max_scan={STEP1_MAX_SCAN_MULTIPLIER}x, early_stop={STEP1_EARLY_STOP_EMPTY_PAGES} 空頁）"
         )
 
+    target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
     all_records = []
+    interrupted_err: BaseException | None = None
 
-    for q in SEARCH_QUERIES:
-        print(f"Searching: {q}")
-        recs = fetch_single_query(
-            q,
-            MAX_RECORDS_PER_QUERY,
-            known_keys=known_keys,
-            needs_backfill=needs_backfill,
-        )
-        all_records.extend(recs)
+    try:
+        for q in SEARCH_QUERIES:
+            print(f"Searching: {q}")
+            recs = fetch_single_query(
+                q,
+                MAX_RECORDS_PER_QUERY,
+                known_keys=known_keys,
+                needs_backfill=needs_backfill,
+                target_pat=target_pat,
+            )
+            all_records.extend(recs)
+    except (KeyboardInterrupt, RuntimeError) as e:
+        interrupted_err = e
+        print(f"\n⚠️  [Step 1] OpenAlex 檢索中途停止（{e}），將先安全保存目前已取得之 {len(all_records)} 筆記錄...")
 
     oa_df = pd.DataFrame(all_records)
     if not oa_df.empty:
@@ -502,31 +533,34 @@ def run_search(append: bool | None = None):
         print(f"[OpenAlex] With DOI: {len(oa_df)}")
 
     s2_df = pd.DataFrame()
-    if ENABLE_SEMANTIC_SCHOLAR:
-        from semantic_scholar_fetcher import search_semantic_scholar
-
-        s2_recs = search_semantic_scholar(
-            SEARCH_QUERIES,
-            known_keys=known_keys,
-            needs_backfill=needs_backfill,
-        )
-        if s2_recs:
-            s2_df = pd.DataFrame(s2_recs).dropna(subset=["doi"])
-
     epmc_df = pd.DataFrame()
-    if ENABLE_EUROPEPMC_XML and EUROPEPMC_MAX_PAPERS > 0:
-        from europepmc_fetcher import search_europepmc_metadata
 
-        epmc_recs = search_europepmc_metadata(
-            known_keys=known_keys,
-            needs_backfill=needs_backfill,
-        )
-        if epmc_recs:
-            epmc_df = pd.DataFrame(epmc_recs)
+    if interrupted_err is None:
+        if ENABLE_SEMANTIC_SCHOLAR:
+            from semantic_scholar_fetcher import search_semantic_scholar
+
+            s2_recs = search_semantic_scholar(
+                SEARCH_QUERIES,
+                known_keys=known_keys,
+                needs_backfill=needs_backfill,
+                append=append,
+            )
+            if s2_recs:
+                s2_df = pd.DataFrame(s2_recs).dropna(subset=["doi"])
+
+        if ENABLE_EUROPEPMC_XML and EUROPEPMC_MAX_PAPERS > 0:
+            from europepmc_fetcher import search_europepmc_metadata
+
+            epmc_recs = search_europepmc_metadata(
+                known_keys=known_keys,
+                needs_backfill=needs_backfill,
+            )
+            if epmc_recs:
+                epmc_df = pd.DataFrame(epmc_recs)
 
     df = _merge_sources(oa_df, s2_df, epmc_df)
 
-    if append and os.path.exists(STEP1_OUTPUT):
+    if (append or interrupted_err is not None) and os.path.exists(STEP1_OUTPUT):
         try:
             if existing_df is None:
                 existing_df = pd.read_csv(STEP1_OUTPUT)
@@ -534,9 +568,12 @@ def run_search(append: bool | None = None):
         except Exception as e:
             print(f"  ⚠️ 無法讀取既有 Step 1 檔案進行合併 ({e})，改以本次結果輸出。")
 
-    df.to_csv(STEP1_OUTPUT, index=False, encoding="utf-8-sig")
+    if not df.empty:
+        save_csv_atomic(df, STEP1_OUTPUT)
+        print(f"✅ Saved to {STEP1_OUTPUT} ({len(df)} papers)")
 
-    print(f"✅ Saved to {STEP1_OUTPUT} ({len(df)} papers)")
+    if interrupted_err is not None:
+        raise interrupted_err
 
     return df
 
