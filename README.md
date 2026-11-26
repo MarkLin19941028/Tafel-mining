@@ -26,8 +26,8 @@
 
 ```mermaid
 flowchart LR
-    S1["Step 1<br/>OpenAlex + S2<br/>搜尋文獻清單"] --> S2["Step 2<br/>Unpaywall + S2<br/>查詢 OA PDF 連結"]
-    S2 --> S3["Step 3<br/>下載 PDF +<br/>Europe PMC XML"]
+    S1["Step 1<br/>OpenAlex + S2 + EPMC<br/>三源搜尋與即時去重"] --> S2["Step 2<br/>S2 Batch + Unpaywall<br/>查詢 OA PDF 連結"]
+    S2 --> S3["Step 3<br/>跨網域並行下載 PDF +<br/>Europe PMC XML 補救"]
     S3 --> S4["Step 4<br/>PyMuPDF + pdfplumber<br/>抽取文字與表格"]
     S4 --> S5["Step 5<br/>萃取 Ecorr / icorr / β<br/>與溶液環境"]
     S5 --> S6["Step 6<br/>跨金屬合併去重<br/>與品質報告"]
@@ -36,15 +36,15 @@ flowchart LR
 
 | 步驟 | 對應腳本 | 主要工作 |
 |---|---|---|
-| **Step 1** | `step1_search_openalex.py` | 依金屬與 `SEARCH_MODES` 查詢 OpenAlex（與 Semantic Scholar），輸出文獻 metadata CSV |
-| **Step 2** | `step2_find_pdf_urls.py` | 透過 Unpaywall（與 Semantic Scholar）依 DOI 找出合法開放取用（OA）PDF 連結 |
-| **Step 3** | `step3_download_pdfs.py` | 下載 OA PDF，並自動透過 `europepmc_fetcher.py` 補抓 Europe PMC 開放全文 XML 與結構化表格 |
+| **Step 1** | `step1_search_openalex.py` | 依金屬與 `SEARCH_MODES` 統一查詢 **OpenAlex、Semantic Scholar、Europe PMC** 三大資料源，於檢索期即時去重、相關性預篩並支援 `Ctrl+C` 原子存檔，輸出文獻 metadata CSV |
+| **Step 2** | `step2_find_pdf_urls.py` | 先進行相關性預篩與 **Semantic Scholar Batch API（200 DOI/次）** 補齊 OA PDF，僅對仍缺連結者查詢 **Unpaywall**（預設跳過已有 PDF 連結者以加速 20~50 倍），並支援中途 Checkpoint 原子存檔 |
+| **Step 3** | `step3_download_pdfs.py` | 依下載狀態表略過已完成／先前失敗論文；以**按網域獨立節流＋跨網域並行執行緒池＋單網域連續 403 熔斷器＋PDF 串流驗證**下載 OA PDF，並透過 `europepmc_fetcher.py` 取得或補救 Europe PMC 開放全文 XML 與結構化表格 |
 | **Step 4** | `step4_extract_text.py` | 使用 PyMuPDF 抽取純文字（`.txt`）、pdfplumber 抽取表格（`_tables.json`） |
 | **Step 5** | `step5_extract_data.py` | 從文字與表格解析電化學參數、統一單位與電位基準（SHE）、過濾物理離群值，輸出單金屬三張標準表 |
-| **Step 6** | `step6_merge.py` | 掃描 `data/` 下所有已完成金屬，跨金屬去重、整併三張核心表並產出 `quality_report.md` |
+| **Step 6** | `step6_merge.py` | 掃描 `data/` 下所有已完成金屬（自動容錯略過空表），跨金屬去重、整併三張核心表並產出 `quality_report.md` |
 | **Step 7** | `step7_enrich_data.py` | 推算有效 pH、補齊元素物性、串接 Materials Project API 與 Pourbaix 引擎，輸出 ML 訓練集與電偶腐蝕風險預覽表 |
 
-> **斷點續跑與容錯設計**：`run_all.py` 會為每個金屬啟動獨立子程序，單一金屬失敗不影響其他金屬；已完成的 Step 1 / Step 2 / PDF / 文字檔會自動略過（可用 `--force` 強制重跑）。
+> **斷點續跑與容錯設計**：`run_all.py` 會為每個金屬啟動獨立子程序，單一金屬失敗不影響其他金屬；Step 1 支援搜尋期即時去重、連續空頁提前停止與中斷原子存檔；Step 2 支援定期 Checkpoint 原子存檔；Step 3 維護持久化下載狀態表，中斷後皆可搭配 `--append` 無痛續跑（完整重抓則用 `--force`）。
 
 ---
 
@@ -121,9 +121,9 @@ flowchart LR
 
 | 步驟 / 說明 | macOS / Linux | Windows (PowerShell / CMD) |
 |---|---|---|
-| Step 1：搜尋 OpenAlex / S2 文獻 | `.venv/bin/python step1_search_openalex.py` | `.venv\Scripts\python.exe step1_search_openalex.py` |
-| Step 2：查詢 Unpaywall / S2 OA PDF 連結 | `.venv/bin/python step2_find_pdf_urls.py` | `.venv\Scripts\python.exe step2_find_pdf_urls.py` |
-| Step 3：下載 PDF + Europe PMC 全文 XML | `.venv/bin/python step3_download_pdfs.py` | `.venv\Scripts\python.exe step3_download_pdfs.py` |
+| Step 1：搜尋 OpenAlex / S2 / Europe PMC 文獻 | `.venv/bin/python step1_search_openalex.py` | `.venv\Scripts\python.exe step1_search_openalex.py` |
+| Step 2：查詢 S2 Batch / Unpaywall OA PDF 連結 | `.venv/bin/python step2_find_pdf_urls.py` | `.venv\Scripts\python.exe step2_find_pdf_urls.py` |
+| Step 3：並行下載 PDF + Europe PMC 全文 XML | `.venv/bin/python step3_download_pdfs.py` | `.venv\Scripts\python.exe step3_download_pdfs.py` |
 | 單獨抓取 Europe PMC 開放全文 XML | `.venv/bin/python europepmc_fetcher.py` | `.venv\Scripts\python.exe europepmc_fetcher.py` |
 | Step 4：從 PDF 抽取文字與表格 | `.venv/bin/python step4_extract_text.py` | `.venv\Scripts\python.exe step4_extract_text.py` |
 | Step 5：萃取電化學參數與三張單金屬表 | `.venv/bin/python step5_extract_data.py` | `.venv\Scripts\python.exe step5_extract_data.py` |
@@ -139,6 +139,8 @@ flowchart LR
 |---|---|---|---|
 | `TAFEL_METAL`：單跑 Step 1~5 時指定金屬（例：`Co`） | `TAFEL_METAL=Co .venv/bin/python step5_extract_data.py` | `$env:TAFEL_METAL="Co"; .venv\Scripts\python.exe step5_extract_data.py` | `set TAFEL_METAL=Co && .venv\Scripts\python.exe step5_extract_data.py` |
 | `TAFEL_SEARCH_MODES`：單跑腳本時覆蓋搜尋模式組合 | `TAFEL_SEARCH_MODES="cmp_etch,inhibitor" .venv/bin/python step1_search_openalex.py` | `$env:TAFEL_SEARCH_MODES="cmp_etch,inhibitor"; .venv\Scripts\python.exe step1_search_openalex.py` | `set TAFEL_SEARCH_MODES=cmp_etch,inhibitor && .venv\Scripts\python.exe step1_search_openalex.py` |
+| `TAFEL_APPEND=1`：單跑 Step 1/2 時啟用增量合併與斷點續跑 | `TAFEL_APPEND=1 .venv/bin/python step2_find_pdf_urls.py` | `$env:TAFEL_APPEND="1"; .venv\Scripts\python.exe step2_find_pdf_urls.py` | `set TAFEL_APPEND=1 && .venv\Scripts\python.exe step2_find_pdf_urls.py` |
+| `TAFEL_RETRY_FAILED=1`：單跑 Step 3 時重試先前失敗論文 | `TAFEL_RETRY_FAILED=1 .venv/bin/python step3_download_pdfs.py` | `$env:TAFEL_RETRY_FAILED="1"; .venv\Scripts\python.exe step3_download_pdfs.py` | `set TAFEL_RETRY_FAILED=1 && .venv\Scripts\python.exe step3_download_pdfs.py` |
 | `TAFEL_FORCE_S2_REFRESH=1`：強制重新查詢 Semantic Scholar（忽略本地快取） | `TAFEL_FORCE_S2_REFRESH=1 .venv/bin/python run_all.py Cu --force` | `$env:TAFEL_FORCE_S2_REFRESH="1"; .venv\Scripts\python.exe run_all.py Cu --force` | `set TAFEL_FORCE_S2_REFRESH=1 && .venv\Scripts\python.exe run_all.py Cu --force` |
 | `TAFEL_QUIET_CONFIG=1`：靜默載入設定（不印出 banner、不自動建資料夾） | `TAFEL_QUIET_CONFIG=1 .venv/bin/python step6_merge.py` | `$env:TAFEL_QUIET_CONFIG="1"; .venv\Scripts\python.exe step6_merge.py` | `set TAFEL_QUIET_CONFIG=1 && .venv\Scripts\python.exe step6_merge.py` |
 
@@ -159,12 +161,15 @@ flowchart LR
 - **`user_settings.py`**：**所有日常可自定義參數的唯一入口**，常用調整項目：
   - `MAILTO`：OpenAlex / Unpaywall 聯絡 Email。
   - `METALS_TO_RUN`：預設批次執行的金屬清單（目前支援 13 種：`Cu, Co, W, Ru, Ti, TiN, TaN, WN, MoN, Al, Ta, Mn, Mo`）。
-  - `SEARCH_MODES`：可自由多選組合 5 種正交搜尋模組——`corrosion`（一般腐蝕）、`cmp_etch`（CMP／濕蝕刻）、`inhibitor`（多樣化緩蝕劑）、`solvent`（非水／有機／半水／混合溶劑）、`catalysis`（電催化）；預設啟用前 3 項。執行 `run_all.py` 時亦可用 `--search-mode cmp_etch inhibitor` 或 `--search-mode solvent` 臨時組合覆蓋。
-  - `MAX_RECORDS_PER_QUERY`：每組關鍵字抓取上限（測試建議 `50`，正式建議 `200`~`300`）。
+  - `SEARCH_MODES`：可自由多選組合 5 種正交搜尋模組——`corrosion`（一般腐蝕）、`cmp_etch`（CMP／濕蝕刻）、`inhibitor`（多樣化緩蝕劑）、`solvent`（非水／有機／半水／混合溶劑）、`catalysis`（電催化，Step 5 主表會剔除腐蝕以外紀錄）；預設啟用前 4 項（`catalysis` 預設註解關閉）。執行 `run_all.py` 時亦可用 `--search-mode cmp_etch inhibitor` 或 `--search-mode catalysis` 臨時組合覆蓋。
+  - **Step 1 檢索與去重控制**：`MAX_RECORDS_PER_QUERY`（OpenAlex 每組關鍵字抓取上限；測試建議 `50`、正式建議 `200`~`300`，設為 `0` 則跳過 OpenAlex 並由 S2 / Europe PMC 補抓）、`STEP1_INFLIGHT_DEDUP`（檢索期即時去重與欄位回補）、`STEP1_MAX_SCAN_MULTIPLIER`（最大翻頁倍率）、`STEP1_EARLY_STOP_EMPTY_PAGES`（連續無新論文即提前結束頁數）。
+  - **Step 2 Unpaywall 最佳化**：`STEP2_SKIP_UNPAYWALL_IF_HAS_PDF`（預設 `True`，OpenAlex / S2 已有 PDF URL 時跳過 Unpaywall，可加速 20~50 倍）、`STEP2_UNPAYWALL_DELAY`（查詢間隔秒數，預設 `0.2`）、`STEP2_CHECKPOINT_EVERY`（每查詢幾筆自動原子存檔，預設 `200`）。
+  - **Step 3 並行下載與防封鎖**：`DOWNLOAD_DELAY`（同一網域最小下載間隔，預設 `2.0` 秒）、`STEP3_MAX_WORKERS`（跨網域並行下載執行緒數，預設 `4`）、`STEP3_DOMAIN_403_THRESHOLD`（單網域連續 403 熔斷門檻，預設 `15`）、`STEP3_MAX_PDF_MB`（單一 PDF 檔案大小上限，預設 `50` MB）。
   - `SKIP_EXISTING_STEP1` / `SKIP_EXISTING_STEP2`：是否啟用斷點續跑。
-  - `ENABLE_SEMANTIC_SCHOLAR` / `ENABLE_EUROPEPMC_XML` / `ENABLE_MP_API`：外部資料源開關。
+  - `ENABLE_SEMANTIC_SCHOLAR` / `ENABLE_EUROPEPMC_XML` / `ENABLE_MP_API`：外部資料源開關（S2 預設 `SEMANTIC_SCHOLAR_USE_BULK = True` 與 `SEMANTIC_SCHOLAR_DELAY = 1.2`，遇 429 會自動 AIMD 動態降速）。
   - `FILTER_OUTLIERS`：是否自動濾除超出物理合理區間的離群值（被濾除的資料會保留於 `*_filtered_outliers.csv`）。
 - **`config.py`**：內部設定載入與衍生引擎（讀取 `user_settings.py`、`.env` 與 `metals_db.json`，自動展開關鍵字、路徑與正規表示式，日常無須手動編輯）。
+- **`record_keys.py`**：跨步驟共用的去重鍵（DOI / PMCID / 標題）、安全檔名、原子 CSV 寫入與標題／摘要相關性預篩工具模組。
 - **`metals_db.json`**：各金屬的英文名稱、化合物清單、專屬 CMP 查詢詞與 $E_{\text{corr}}$ 合理電位區間。
 - **`materials_physics.json`**：元素與化合物的物理常數、標準電極電位與 Pourbaix 熱力學參數。
   > 新增自訂金屬時，請同步編輯這兩個 JSON 檔，並執行 `run_all.py --check-db` 確認無誤。
@@ -216,9 +221,10 @@ data/
 |---|---|---|
 | **`ModuleNotFoundError: No module named 'pymupdf'`** | 1. 沒使用 `.venv` 的 Python<br>2. 安裝到舊版 `PyMuPDF < 1.24.0` | 確認使用 `.venv/bin/python`（或 `.venv\Scripts\python.exe`），並執行 `pip install --upgrade "pymupdf>=1.24.0"`。 |
 | **API 回傳 `429 Too Many Requests`** | OpenAlex 或 Semantic Scholar 公開 IP 免費額度達上限 | 在 `.env` 填入 `OPENALEX_API_KEY` 與 `SEMANTIC_SCHOLAR_API_KEY`；若無 S2 Key，可在 `user_settings.py` 將 `SEMANTIC_SCHOLAR_DELAY` 調大或暫設 `ENABLE_SEMANTIC_SCHOLAR = False`。 |
-| **Step 3 大量 PDF 回傳 `403 Forbidden`** | 出版商網站（如 Elsevier/Wiley）的 WAF 防爬蟲阻擋 | 屬正常現象。程式已內建 **Europe PMC 開放全文 XML** 自動補位（免 Key、無 403 且含原生結構化表格），不影響後續萃取。 |
+| **Step 3 大量 PDF 回傳 `403 Forbidden`** | 出版商網站（如 Elsevier/Wiley）的 WAF 防爬蟲阻擋 | 屬正常現象。Step 3 已內建**單網域連續 403 熔斷器**（達 `STEP3_DOMAIN_403_THRESHOLD` 即跳過該網域後續請求），並自動改走其他候選或 **Europe PMC 開放全文 XML**（免 Key、無 403、含 429/5xx 自動退避重試與原生結構化表格），不影響後續萃取。 |
+| **Step 1 / Step 2 執行到一半被中斷（`Ctrl+C` 或斷線）** | 大量查詢中途手動停止或網路中斷 | Step 1 中斷時會原子存檔已抓結果，Step 2 也會每 `STEP2_CHECKPOINT_EVERY` 筆自動 Checkpoint 存檔；重新執行時加上 `--append` 即可從中斷處無痛續跑，不會遺失既有進度。 |
 | **Step 5 顯示「沒有任何文字檔，略過」** | `data/<METAL>/texts/` 內沒有 `.txt` 檔（Step 3/4 未執行或下載全數失敗） | 先跑 `--from-step 3` 或單獨執行 `europepmc_fetcher.py` 取得開放全文。 |
-| **Step 6 合併時缺少某個金屬** | 該金屬的 `extracted/` 下缺少三張必要 CSV 之一（`material_properties`、`solution_properties`、`electrochemical_database`） | 對該金屬重跑 `--from-step 5`，確認三張 CSV 皆已產出後再執行 `step6_merge.py`。 |
+| **Step 6 合併時缺少某個金屬或略過空表** | 該金屬的 `extracted/` 下缺少三張必要 CSV 之一，或該金屬萃取出 0 筆紀錄（空 CSV） | Step 6 會自動略過空 CSV 不中斷合併；若需補齊，請對該金屬重跑 `--from-step 5` 確認三張 CSV 皆有資料後再執行 `step6_merge.py`。 |
 | **Step 7 顯示 Offline 或沒裝 `mp-api`** | 未設定 `MP_API_KEY` 或 Python 3.13/3.14 尚未安裝 `mp-api`/`pymatgen` | **不影響執行**：無 `mp-api` 時會自動透過 REST API v2 抓取 MP 資料；無 `MP_API_KEY` 時也會用內建熱力學常數與 Pourbaix 引擎完成輸出。 |
 | **Windows PowerShell 無法執行 `Activate.ps1`** | Windows 預設禁止執行未簽署腳本（ExecutionPolicy） | 最簡單解法：**不需 activate**，直接使用 `.venv\Scripts\python.exe ...`；或執行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。 |
 | **改了 `user_settings.py` 但重跑沒生效** | Step 1/2 啟用了斷點續跑，或 Semantic Scholar / MP 讀到舊快取 | 加 `--append`（增量合併）或 `--force`（強制覆寫）重跑 Step 1/2；重抓 S2 請加 `TAFEL_FORCE_S2_REFRESH=1`；重抓 MP 請跑 `step7_enrich_data.py --refresh-cache`。 |
