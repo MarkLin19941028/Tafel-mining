@@ -56,6 +56,12 @@ STEP3_MAX_PDF_MB = getattr(_us, "STEP3_MAX_PDF_MB", 50)
 REQUEST_TIMEOUT = _us.REQUEST_TIMEOUT
 FROM_YEAR = _us.FROM_YEAR
 
+ENABLE_OPENALEX = (
+    getattr(_us, "ENABLE_OPENALEX", True)
+    and os.environ.get("TAFEL_SKIP_OPENALEX") != "1"
+)
+OPENALEX_USE_GROUPED_QUERIES = getattr(_us, "OPENALEX_USE_GROUPED_QUERIES", True)
+
 ENABLE_SEMANTIC_SCHOLAR = _us.ENABLE_SEMANTIC_SCHOLAR
 SEMANTIC_SCHOLAR_USE_BULK = _us.SEMANTIC_SCHOLAR_USE_BULK
 SEMANTIC_SCHOLAR_MAX_PER_QUERY = _us.SEMANTIC_SCHOLAR_MAX_PER_QUERY
@@ -324,8 +330,103 @@ _MODE_QUERY_MAP: dict[str, list[str]] = {
 }
 
 
-def build_search_queries(modes: list[str] | tuple[str, ...] | str | None = None) -> list[str]:
+_OPENALEX_COMPOUND_BATCH_SIZE: int = 8
+_OPENALEX_CUSTOM_QUERY_BATCH_SIZE: int = 4
+
+
+def _chunk_list(items: list[str], size: int) -> list[list[str]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def build_grouped_openalex_queries(
+    modes: list[str] | tuple[str, ...] | str | None = None,
+) -> list[str]:
+    """
+    依選取的搜尋模式組裝高密度 OpenAlex 布林查詢（AND / OR），
+    將原本每金屬 ~110-126 組展開查詢濃縮為 ~10-15 組，大幅節省每日配額。
+    """
+    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
+    metal_clause = (
+        f'("{TARGET_METAL}" OR "{METAL_SYMBOL}")'
+        if TARGET_METAL.lower() != METAL_SYMBOL.lower()
+        else f'"{TARGET_METAL}"'
+    )
+    queries: list[str] = []
+
+    if "corrosion" in active_modes:
+        queries.append(
+            f'{metal_clause} AND ("potentiodynamic polarization" OR "corrosion current density" '
+            f'OR "Tafel extrapolation" OR "Tafel plot" OR "Tafel slope" '
+            f'OR "electrochemical corrosion" OR "polarization curve" OR "polarization resistance" '
+            f'OR "anodic polarization" OR "cathodic polarization" OR ("Ecorr" AND "icorr"))'
+        )
+        for batch in _chunk_list(COMPOUNDS, _OPENALEX_COMPOUND_BATCH_SIZE):
+            comp_or = " OR ".join(f'"{c}"' for c in batch)
+            queries.append(
+                f'({comp_or}) AND ("potentiodynamic polarization" OR "corrosion current density")'
+            )
+
+    if "cmp_etch" in active_modes:
+        queries.append(
+            f'{metal_clause} AND ("chemical mechanical" OR "CMP" OR "slurry" OR "wet etching" '
+            f'OR "H2O2" OR "hydrogen peroxide" OR "galvanic corrosion") '
+            f'AND ("potentiodynamic" OR "potentiodynamic polarization" OR "Tafel" OR "corrosion current")'
+        )
+        for batch in _chunk_list(CMP_QUERIES, _OPENALEX_CUSTOM_QUERY_BATCH_SIZE):
+            queries.append(" OR ".join(f"({q})" for q in batch))
+
+    if "inhibitor" in active_modes:
+        queries.append(
+            f'{metal_clause} AND ("corrosion inhibitor" OR "corrosion inhibition" '
+            f'OR "inhibition efficiency" OR "organic inhibitor" OR "mixed-type inhibitor") '
+            f'AND ("potentiodynamic" OR "potentiodynamic polarization" OR "Tafel" '
+            f'OR "corrosion current" OR ("Ecorr" AND "icorr"))'
+        )
+        queries.append(
+            f'{metal_clause} AND ("triazole" OR "imidazole" OR "tetrazole" OR "thiazole" '
+            f'OR "Schiff base" OR "amino acid" OR "cysteine" OR "thiourea" '
+            f'OR "surfactant" OR "ionic liquid") '
+            f'AND ("corrosion" OR "corrosion inhibitor") AND ("potentiodynamic" OR "polarization" OR "Tafel")'
+        )
+        for batch in _chunk_list(INHIBITOR_QUERIES, _OPENALEX_CUSTOM_QUERY_BATCH_SIZE):
+            queries.append(" OR ".join(f"({q})" for q in batch))
+
+    if "solvent" in active_modes:
+        queries.append(
+            f'{metal_clause} AND ("non-aqueous" OR "nonaqueous" OR "organic solvent" OR "organic media" '
+            f'OR "anhydrous" OR "semi-aqueous" OR "mixed solvent" OR "water-organic" '
+            f'OR "aqueous-organic" OR "trace water" OR "protic solvent" OR "aprotic solvent" OR "co-solvent") '
+            f'AND ("potentiodynamic" OR "potentiodynamic polarization" OR "Tafel" OR "polarization")'
+        )
+        queries.append(
+            f'{metal_clause} AND ("methanol" OR "ethanol" OR "ethylene glycol" OR "DMSO" '
+            f'OR "DMF" OR "acetonitrile" OR "NMP" OR "deep eutectic solvent" OR "ionic liquid") '
+            f'AND "corrosion" AND ("potentiodynamic polarization" OR "polarization")'
+        )
+
+    if "catalysis" in active_modes:
+        queries.append(
+            f'{metal_clause} AND ("Tafel slope" OR "Tafel plot" OR "exchange current density" '
+            f'OR "linear sweep voltammetry" OR "polarization curve") '
+            f'AND ("hydrogen evolution" OR "oxygen evolution" OR "oxygen reduction" '
+            f'OR "CO2 reduction" OR "electrocatalyst" OR "catalyst")'
+        )
+        for batch in _chunk_list(COMPOUNDS, _OPENALEX_COMPOUND_BATCH_SIZE):
+            comp_or = " OR ".join(f'"{c}"' for c in batch)
+            queries.append(f'({comp_or}) AND ("Tafel slope" OR "Tafel")')
+
+    return list(dict.fromkeys(queries))
+
+
+def build_search_queries(
+    modes: list[str] | tuple[str, ...] | str | None = None,
+    *,
+    grouped: bool | None = None,
+) -> list[str]:
     """依指定的搜尋模式清單組裝並去重 OpenAlex 查詢清單。"""
+    use_grouped = OPENALEX_USE_GROUPED_QUERIES if grouped is None else grouped
+    if use_grouped:
+        return build_grouped_openalex_queries(modes)
     active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
     return list(dict.fromkeys(
         q for m in active_modes for q in _MODE_QUERY_MAP[m]
@@ -369,6 +470,10 @@ STEP1_OUTPUT = os.path.join(
 S2_CACHE_PATH = os.path.join(
     METADATA_DIR,
     f"{METAL_SYMBOL.lower()}_s2_cache.json",
+)
+STEP1_CURSOR_STATE_PATH = os.path.join(
+    METADATA_DIR,
+    f"{METAL_SYMBOL.lower()}_step1_cursor_state.json",
 )
 STEP2_OUTPUT = os.path.join(
     METADATA_DIR,
@@ -468,7 +573,13 @@ def print_config():
         if (ENABLE_MP_API and MP_API_KEY)
         else ("ON (Offline)" if ENABLE_MP_API else "OFF")
     )
-    print(f"  OpenAlex Key : {'設定完成' if OPENALEX_API_KEY else '未設定（共用 IP 免費額度）'}")
+    oa_mode = "Grouped" if OPENALEX_USE_GROUPED_QUERIES else "Expanded"
+    oa_status = (
+        f"ON ({oa_mode}, {'API Key' if OPENALEX_API_KEY else 'Public'})"
+        if ENABLE_OPENALEX
+        else "OFF"
+    )
+    print(f"  OpenAlex     : {oa_status}")
     print(f"  S2 / MP API  : Semantic Scholar {s2_status}  |  Materials Project {mp_status}")
     print(
         f"  Compounds    : {len(COMPOUNDS)} types  |  "

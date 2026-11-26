@@ -17,6 +17,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -26,6 +27,7 @@ def run_single_metal(
     force: bool = False,
     append: bool = False,
     retry_failed: bool = False,
+    skip_openalex: bool = False,
 ) -> None:
     """在獨立子進程中執行單一金屬的 Step from_step ~ min(to_step, 5)。"""
     import step1_search_openalex
@@ -50,7 +52,7 @@ def run_single_metal(
         if not force and not append and SKIP_EXISTING_STEP1 and os.path.exists(STEP1_OUTPUT):
             print(f"⏭️  已存在 Step 1 輸出，略過：{STEP1_OUTPUT}")
         else:
-            step1_search_openalex.run_search(append=append)
+            step1_search_openalex.run_search(append=append, skip_openalex=skip_openalex)
 
     if from_step <= 2 <= to_step:
         print("\n" + "=" * 60)
@@ -100,6 +102,7 @@ def run_batch(
     search_modes: list[str] | None = None,
     no_merge: bool = False,
     no_enrich: bool = False,
+    skip_openalex: bool = False,
 ) -> int:
     """依序以獨立子進程執行多個金屬，單一金屬失敗不中斷其餘金屬，最後依區間執行 Step 6 與 Step 7。"""
     script_path = os.path.abspath(__file__)
@@ -114,7 +117,7 @@ def run_batch(
     print(f"  Metals ({len(metals)}): {', '.join(metals)}")
     print(
         f"  Steps     : {from_step} -> {to_step}  |  Force: {force}  |  Append: {append}  |  "
-        f"RetryFailed: {retry_failed}"
+        f"RetryFailed: {retry_failed}  |  SkipOA: {skip_openalex}"
     )
     print(f"  Post-steps: Merge: {run_merge}  |  Enrich: {run_enrich}")
     if search_modes:
@@ -124,49 +127,73 @@ def run_batch(
     summary: list[tuple[str, str, float]] = []
 
     if from_step <= 5:
-        for idx, metal in enumerate(metals, start=1):
-            print("\n" + "#" * 65)
-            print(f"  [{idx}/{len(metals)}] Starting metal: {metal}")
-            print("#" * 65)
-            t0 = time.time()
+        oa_quota_marker = os.path.join(
+            tempfile.gettempdir(),
+            f"tafel_oa_quota_{os.getpid()}_{int(time.time())}.flag",
+        )
+        oa_quota_exhausted_in_batch = False
+        try:
+            for idx, metal in enumerate(metals, start=1):
+                print("\n" + "#" * 65)
+                print(f"  [{idx}/{len(metals)}] Starting metal: {metal}")
+                print("#" * 65)
+                t0 = time.time()
 
-            env = os.environ.copy()
-            env["TAFEL_METAL"] = metal
-            if search_modes:
-                env["TAFEL_SEARCH_MODES"] = ",".join(search_modes)
-            if append:
-                env["TAFEL_APPEND"] = "1"
-            if retry_failed:
-                env["TAFEL_RETRY_FAILED"] = "1"
-            env.pop("TAFEL_QUIET_CONFIG", None)
+                effective_skip_oa = skip_openalex or oa_quota_exhausted_in_batch
+                if oa_quota_exhausted_in_batch and not skip_openalex:
+                    print("  ⚠️  [Batch] OpenAlex 每日配額於前一個金屬已耗盡，本金屬自動略過 OpenAlex 改跑 S2 + Europe PMC。")
 
-            cmd = [
-                sys.executable,
-                script_path,
-                "--single-metal",
-                metal,
-                "--from-step",
-                str(from_step),
-                "--to-step",
-                str(to_step),
-            ]
-            if search_modes:
-                cmd.extend(["--search-mode", *search_modes])
-            if force:
-                cmd.append("--force")
-            if append:
-                cmd.append("--append")
-            if retry_failed:
-                cmd.append("--retry-failed")
+                env = os.environ.copy()
+                env["TAFEL_METAL"] = metal
+                env["TAFEL_OA_QUOTA_MARKER"] = oa_quota_marker
+                if search_modes:
+                    env["TAFEL_SEARCH_MODES"] = ",".join(search_modes)
+                if append:
+                    env["TAFEL_APPEND"] = "1"
+                if retry_failed:
+                    env["TAFEL_RETRY_FAILED"] = "1"
+                if effective_skip_oa:
+                    env["TAFEL_SKIP_OPENALEX"] = "1"
+                env.pop("TAFEL_QUIET_CONFIG", None)
 
-            proc = subprocess.run(cmd, env=env)
-            elapsed = time.time() - t0
+                cmd = [
+                    sys.executable,
+                    script_path,
+                    "--single-metal",
+                    metal,
+                    "--from-step",
+                    str(from_step),
+                    "--to-step",
+                    str(to_step),
+                ]
+                if search_modes:
+                    cmd.extend(["--search-mode", *search_modes])
+                if force:
+                    cmd.append("--force")
+                if append:
+                    cmd.append("--append")
+                if retry_failed:
+                    cmd.append("--retry-failed")
+                if effective_skip_oa:
+                    cmd.append("--skip-openalex")
 
-            if proc.returncode == 0:
-                summary.append((metal, "✅ OK", elapsed))
-            else:
-                print(f"\n❌ [{metal}] 執行失敗 (exit code {proc.returncode})，記錄錯誤並繼續下一個金屬...")
-                summary.append((metal, f"❌ FAILED (code {proc.returncode})", elapsed))
+                proc = subprocess.run(cmd, env=env)
+                elapsed = time.time() - t0
+
+                if not oa_quota_exhausted_in_batch and os.path.exists(oa_quota_marker):
+                    oa_quota_exhausted_in_batch = True
+
+                if proc.returncode == 0:
+                    summary.append((metal, "✅ OK", elapsed))
+                else:
+                    print(f"\n❌ [{metal}] 執行失敗 (exit code {proc.returncode})，記錄錯誤並繼續下一個金屬...")
+                    summary.append((metal, f"❌ FAILED (code {proc.returncode})", elapsed))
+        finally:
+            if os.path.exists(oa_quota_marker):
+                try:
+                    os.remove(oa_quota_marker)
+                except OSError:
+                    pass
 
     # Step 6：以獨立子進程執行，確保重新掃描所有剛完成的金屬資料夾
     merge_ok = True
@@ -246,6 +273,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--retry-failed",
         action="store_true",
         help="Step 3 重試先前下載失敗的論文（包含 failed 與離線初始化標記的 failed_legacy）",
+    )
+    parser.add_argument(
+        "--skip-openalex",
+        action="store_true",
+        help="Step 1 略過 OpenAlex 檢索，僅執行 Semantic Scholar 與 Europe PMC",
     )
     parser.add_argument(
         "--search-mode",
@@ -339,12 +371,15 @@ def main():
             os.environ["TAFEL_APPEND"] = "1"
         if args.retry_failed:
             os.environ["TAFEL_RETRY_FAILED"] = "1"
+        if args.skip_openalex:
+            os.environ["TAFEL_SKIP_OPENALEX"] = "1"
         run_single_metal(
             from_step=args.from_step,
             to_step=args.to_step,
             force=args.force,
             append=args.append,
             retry_failed=args.retry_failed,
+            skip_openalex=args.skip_openalex,
         )
         return
 
@@ -408,6 +443,7 @@ def main():
         search_modes=resolved_modes,
         no_merge=args.no_merge,
         no_enrich=args.no_enrich,
+        skip_openalex=args.skip_openalex,
     )
     sys.exit(exit_code)
 

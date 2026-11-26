@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from config import (
     ENABLE_EUROPEPMC_XML,
+    ENABLE_OPENALEX,
     ENABLE_SEMANTIC_SCHOLAR,
     EUROPEPMC_MAX_PAPERS,
     FROM_YEAR,
@@ -25,6 +26,7 @@ from config import (
     REQUEST_TIMEOUT,
     REQUIRE_TARGET_IN_TITLE_ABSTRACT,
     SEARCH_QUERIES,
+    STEP1_CURSOR_STATE_PATH,
     STEP1_EARLY_STOP_EMPTY_PAGES,
     STEP1_INFLIGHT_DEDUP,
     STEP1_MAX_SCAN_MULTIPLIER,
@@ -38,9 +40,18 @@ from record_keys import (
     normalize_pmcid,
     save_csv_atomic,
 )
+from step1_cursor_state import Step1CursorStore, make_cursor_key
 
 BASE_URL = "https://api.openalex.org/works"
 _SESSION = requests.Session()
+
+
+class OpenAlexQuotaExhaustedError(RuntimeError):
+    """OpenAlex 每日配額耗盡時拋出，供上層安全保存游標並降級續跑其餘資料源。"""
+
+
+class OpenAlexInvalidCursorError(RuntimeError):
+    """OpenAlex 拒收既有跨次游標（HTTP 400）時拋出，供查詢函式自動退回從頭掃描。"""
 
 
 def invert_abstract(inv_index: dict) -> str:
@@ -81,7 +92,7 @@ def request_with_retry(url, params, max_retries=5):
                 retry_sec = int(retry_after) if retry_after and retry_after.isdigit() else None
                 if "insufficient budget" in msg.lower() or (retry_sec is not None and retry_sec > 300):
                     hours = f"{retry_sec / 3600:.1f} 小時" if retry_sec else "UTC 午夜"
-                    raise RuntimeError(
+                    raise OpenAlexQuotaExhaustedError(
                         f"OpenAlex 每日配額已耗盡（約 {hours} 後重置）。"
                         f"請確認專案根目錄 .env 的 OPENALEX_API_KEY 已正確填入。"
                     )
@@ -93,6 +104,13 @@ def request_with_retry(url, params, max_retries=5):
                 time.sleep(wait)
 
                 continue
+
+            if resp.status_code == 400:
+                if params.get("cursor") and params.get("cursor") != "*":
+                    raise OpenAlexInvalidCursorError(
+                        f"OpenAlex rejected cursor (HTTP 400): {resp.text[:200]}"
+                    )
+                raise RuntimeError(f"OpenAlex HTTP 400: {resp.text[:200]}")
 
             if 500 <= resp.status_code < 600:
 
@@ -219,6 +237,8 @@ def fetch_single_query(
     max_scan_multiplier: int | None = None,
     early_stop_empty_pages: int | None = None,
     target_pat=None,
+    start_cursor: str = "*",
+    cursor_out: dict | None = None,
 ) -> list[dict]:
     if max_records <= 0:
         return []
@@ -238,105 +258,129 @@ def fetch_single_query(
     backfill_count = 0
     pages_scanned = 0
     empty_pages = 0
-    cursor = "*"
+    cursor = start_cursor or "*"
+    next_cursor_to_save: str | None = cursor if cursor != "*" else None
+    exhausted = False
 
     pbar = tqdm(total=max_records, desc=f"  {search_query[:50]}", leave=False)
 
-    while new_count < max_records:
-        params = {
-            "search": search_query,
-            "filter": f"from_publication_date:{FROM_YEAR}-01-01,type:article",
-            "per-page": per_page,
-            "cursor": cursor,
-            "mailto": MAILTO,
-            "select": (
-                "id,doi,title,publication_year,primary_location,"
-                "best_oa_location,open_access,"
-                "abstract_inverted_index,cited_by_count,authorships"
-            ),
-        }
+    try:
+        while new_count < max_records:
+            params = {
+                "search": search_query,
+                "filter": f"from_publication_date:{FROM_YEAR}-01-01,type:article",
+                "per-page": per_page,
+                "cursor": cursor,
+                "mailto": MAILTO,
+                "select": (
+                    "id,doi,title,publication_year,primary_location,"
+                    "best_oa_location,open_access,"
+                    "abstract_inverted_index,cited_by_count,authorships"
+                ),
+            }
 
-        if OPENALEX_API_KEY:
-            params["api_key"] = OPENALEX_API_KEY
+            if OPENALEX_API_KEY:
+                params["api_key"] = OPENALEX_API_KEY
 
-        resp = request_with_retry(BASE_URL, params)
-        data = resp.json()
-        results = data.get("results", [])
+            try:
+                resp = request_with_retry(BASE_URL, params)
+            except OpenAlexInvalidCursorError:
+                if cursor != "*" and pages_scanned == 0:
+                    print("  ⚠️  OpenAlex 既有游標已失效，自動重設為從頭掃描 (*)")
+                    cursor = "*"
+                    next_cursor_to_save = None
+                    continue
+                raise
 
-        if not results:
-            break
+            data = resp.json()
+            results = data.get("results", [])
 
-        page_new = 0
-        for item in results:
-            key = make_record_key(item.get("doi"))
-            if not key:
-                continue
+            if not results:
+                exhausted = True
+                next_cursor_to_save = None
+                break
 
-            if inflight and key in known_keys:
-                skipped_dup += 1
-                missing = needs_backfill.get(key) if needs_backfill is not None else None
-                if missing:
-                    best_oa = item.get("best_oa_location") or {}
-                    best_pdf_url = best_oa.get("pdf_url")
-                    can_fill_pdf = ("best_pdf_url" in missing) and (not _is_missing_http_url(best_pdf_url))
-                    can_fill_abs = ("abstract" in missing) and bool(item.get("abstract_inverted_index"))
-                    if can_fill_pdf or can_fill_abs:
-                        records.append(_build_openalex_record(item, search_query))
-                        backfill_count += 1
-                        if can_fill_pdf:
-                            missing.discard("best_pdf_url")
-                        if can_fill_abs:
-                            missing.discard("abstract")
-                        if not missing:
-                            needs_backfill.pop(key, None)
-                continue
+            page_new = 0
+            for item in results:
+                key = make_record_key(item.get("doi"))
+                if not key:
+                    continue
 
-            rec = _build_openalex_record(item, search_query)
+                if inflight and key in known_keys:
+                    skipped_dup += 1
+                    missing = needs_backfill.get(key) if needs_backfill is not None else None
+                    if missing:
+                        best_oa = item.get("best_oa_location") or {}
+                        best_pdf_url = best_oa.get("pdf_url")
+                        can_fill_pdf = ("best_pdf_url" in missing) and (not _is_missing_http_url(best_pdf_url))
+                        can_fill_abs = ("abstract" in missing) and bool(item.get("abstract_inverted_index"))
+                        if can_fill_pdf or can_fill_abs:
+                            records.append(_build_openalex_record(item, search_query))
+                            backfill_count += 1
+                            if can_fill_pdf:
+                                missing.discard("best_pdf_url")
+                            if can_fill_abs:
+                                missing.discard("abstract")
+                            if not missing:
+                                needs_backfill.pop(key, None)
+                    continue
 
-            # 若同時具備標題與摘要但兩者皆未提及目標金屬，直接略過以免吃掉 MAX_RECORDS_PER_QUERY 配額
-            if not is_title_abstract_relevant(
-                rec.get("title"),
-                rec.get("abstract"),
-                target_pat,
-                require_both_present=True,
-            ):
-                skipped_irrel += 1
-                continue
+                rec = _build_openalex_record(item, search_query)
 
-            records.append(rec)
-            new_count += 1
-            page_new += 1
-            pbar.update(1)
+                # 若同時具備標題與摘要但兩者皆未提及目標金屬，直接略過以免吃掉 MAX_RECORDS_PER_QUERY 配額
+                if not is_title_abstract_relevant(
+                    rec.get("title"),
+                    rec.get("abstract"),
+                    target_pat,
+                    require_both_present=True,
+                ):
+                    skipped_irrel += 1
+                    continue
 
-            if inflight:
-                known_keys.add(key)
-                if needs_backfill is not None:
-                    missing_new = _record_missing_fields(rec["best_pdf_url"], rec["abstract"], rec["pmcid"])
-                    if missing_new:
-                        needs_backfill[key] = missing_new
+                records.append(rec)
+                new_count += 1
+                page_new += 1
+                pbar.update(1)
+
+                if inflight:
+                    known_keys.add(key)
+                    if needs_backfill is not None:
+                        missing_new = _record_missing_fields(rec["best_pdf_url"], rec["abstract"], rec["pmcid"])
+                        if missing_new:
+                            needs_backfill[key] = missing_new
+
+                if new_count >= max_records:
+                    break
+
+            pages_scanned += 1
+            empty_pages = (empty_pages + 1) if page_new == 0 else 0
+
+            next_cursor = data.get("meta", {}).get("next_cursor")
+            if not next_cursor:
+                exhausted = True
+                next_cursor_to_save = None
+            else:
+                next_cursor_to_save = next_cursor
 
             if new_count >= max_records:
                 break
 
-        pages_scanned += 1
-        empty_pages = (empty_pages + 1) if page_new == 0 else 0
+            if inflight:
+                if early_stop > 0 and empty_pages >= early_stop:
+                    break
+                if pages_scanned >= max_pages:
+                    break
 
-        if new_count >= max_records:
-            break
-
-        if inflight:
-            if early_stop > 0 and empty_pages >= early_stop:
-                break
-            if pages_scanned >= max_pages:
+            if not next_cursor:
                 break
 
-        cursor = data.get("meta", {}).get("next_cursor")
-        if not cursor:
-            break
-
-        time.sleep(0.5)
-
-    pbar.close()
+            cursor = next_cursor
+            time.sleep(0.5)
+    finally:
+        pbar.close()
+        if cursor_out is not None:
+            cursor_out["next_cursor"] = None if exhausted else next_cursor_to_save
+            cursor_out["exhausted"] = exhausted
 
     if inflight:
         bf_msg = f", backfill {backfill_count}" if backfill_count else ""
@@ -477,13 +521,28 @@ def _merge_with_existing_step1(existing_df: pd.DataFrame, new_df: pd.DataFrame) 
     return merged
 
 
-def run_search(append: bool | None = None):
+def _mark_batch_oa_quota_exhausted() -> None:
+    """若由 run_all 批次模式啟動，寫入配額耗盡標記檔，讓後續金屬自動跳過 OpenAlex。"""
+    marker_path = os.environ.get("TAFEL_OA_QUOTA_MARKER", "").strip()
+    if not marker_path:
+        return
+    try:
+        with open(marker_path, "w", encoding="utf-8") as f:
+            f.write("exhausted\n")
+    except OSError:
+        pass
+
+
+def run_search(append: bool | None = None, skip_openalex: bool | None = None):
     if append is None:
         append = os.environ.get("TAFEL_APPEND") == "1"
+    if skip_openalex is None:
+        skip_openalex = os.environ.get("TAFEL_SKIP_OPENALEX") == "1"
 
     existing_df: pd.DataFrame | None = None
     known_keys: set[str] | None = set() if STEP1_INFLIGHT_DEDUP else None
     needs_backfill: dict[str, set[str]] | None = {} if STEP1_INFLIGHT_DEDUP else None
+    cursor_store = Step1CursorStore(STEP1_CURSOR_STATE_PATH)
 
     if append and os.path.exists(STEP1_OUTPUT):
         try:
@@ -508,21 +567,63 @@ def run_search(append: bool | None = None):
     target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
     all_records = []
     interrupted_err: BaseException | None = None
+    oa_enabled = ENABLE_OPENALEX and (not skip_openalex)
 
-    try:
-        for q in SEARCH_QUERIES:
-            print(f"Searching: {q}")
-            recs = fetch_single_query(
-                q,
-                MAX_RECORDS_PER_QUERY,
-                known_keys=known_keys,
-                needs_backfill=needs_backfill,
-                target_pat=target_pat,
+    if oa_enabled:
+        skipped_exhausted = 0
+        resumed_queries = 0
+        try:
+            for q in SEARCH_QUERIES:
+                q_key = make_cursor_key("openalex", q, FROM_YEAR)
+                start_cursor = "*"
+                if append:
+                    saved_cursor, is_exhausted = cursor_store.get(q_key)
+                    if is_exhausted:
+                        skipped_exhausted += 1
+                        continue
+                    if saved_cursor:
+                        start_cursor = saved_cursor
+                        resumed_queries += 1
+
+                resume_note = " [續頁]" if start_cursor != "*" else ""
+                print(f"Searching{resume_note}: {q}")
+                cursor_box: dict = {}
+                try:
+                    recs = fetch_single_query(
+                        q,
+                        MAX_RECORDS_PER_QUERY,
+                        known_keys=known_keys,
+                        needs_backfill=needs_backfill,
+                        target_pat=target_pat,
+                        start_cursor=start_cursor,
+                        cursor_out=cursor_box,
+                    )
+                    all_records.extend(recs)
+                finally:
+                    if cursor_box:
+                        cursor_store.update(
+                            q_key,
+                            cursor_box.get("next_cursor"),
+                            bool(cursor_box.get("exhausted", False)),
+                        )
+        except OpenAlexQuotaExhaustedError as e:
+            _mark_batch_oa_quota_exhausted()
+            print(
+                f"\n⚠️  [Step 1] {e}\n"
+                f"   已安全保存目前 OpenAlex 取得之 {len(all_records)} 筆記錄與游標進度，"
+                f"將自動降級繼續執行 Semantic Scholar 與 Europe PMC..."
             )
-            all_records.extend(recs)
-    except (KeyboardInterrupt, RuntimeError) as e:
-        interrupted_err = e
-        print(f"\n⚠️  [Step 1] OpenAlex 檢索中途停止（{e}），將先安全保存目前已取得之 {len(all_records)} 筆記錄...")
+        except (KeyboardInterrupt, RuntimeError) as e:
+            interrupted_err = e
+            print(f"\n⚠️  [Step 1] OpenAlex 檢索中途停止（{e}），將先安全保存目前已取得之 {len(all_records)} 筆記錄...")
+
+        if skipped_exhausted or resumed_queries:
+            print(
+                f"[OpenAlex Cursor] 續頁查詢: {resumed_queries} 組 | "
+                f"已見底略過: {skipped_exhausted} 組（0 API 請求）"
+            )
+    else:
+        print("[OpenAlex] 已略過（ENABLE_OPENALEX=False 或 --skip-openalex）")
 
     oa_df = pd.DataFrame(all_records)
     if not oa_df.empty:
@@ -549,14 +650,35 @@ def run_search(append: bool | None = None):
                 s2_df = pd.DataFrame(s2_recs).dropna(subset=["doi"])
 
         if ENABLE_EUROPEPMC_XML and EUROPEPMC_MAX_PAPERS > 0:
-            from europepmc_fetcher import search_europepmc_metadata
+            from europepmc_fetcher import build_europepmc_query, search_europepmc_metadata
 
-            epmc_recs = search_europepmc_metadata(
-                known_keys=known_keys,
-                needs_backfill=needs_backfill,
-            )
-            if epmc_recs:
-                epmc_df = pd.DataFrame(epmc_recs)
+            epmc_query = build_europepmc_query()
+            epmc_key = make_cursor_key("europepmc", epmc_query, FROM_YEAR)
+            epmc_start = "*"
+            epmc_exhausted = False
+            if append:
+                saved_epmc, epmc_exhausted = cursor_store.get(epmc_key)
+                if saved_epmc and not epmc_exhausted:
+                    epmc_start = saved_epmc
+
+            if append and epmc_exhausted:
+                print("\n[Europe PMC] 既有查詢已掃描完畢（exhausted），略過重複請求（0 API 請求）。")
+            else:
+                epmc_cursor_box: dict = {}
+                epmc_recs = search_europepmc_metadata(
+                    known_keys=known_keys,
+                    needs_backfill=needs_backfill,
+                    start_cursor=epmc_start,
+                    cursor_out=epmc_cursor_box,
+                )
+                if epmc_cursor_box:
+                    cursor_store.update(
+                        epmc_key,
+                        epmc_cursor_box.get("next_cursor"),
+                        bool(epmc_cursor_box.get("exhausted", False)),
+                    )
+                if epmc_recs:
+                    epmc_df = pd.DataFrame(epmc_recs)
 
     df = _merge_sources(oa_df, s2_df, epmc_df)
 

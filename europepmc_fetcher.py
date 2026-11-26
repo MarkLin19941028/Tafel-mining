@@ -301,11 +301,14 @@ def search_europepmc_metadata(
     needs_backfill: dict[str, set[str]] | None = None,
     max_scan_multiplier: int | None = None,
     early_stop_empty_pages: int | None = None,
+    start_cursor: str = "*",
+    cursor_out: dict | None = None,
 ) -> list[dict]:
     """
     查詢 Europe PMC 開放取用文獻 metadata（供 Step 1 與 OpenAlex / Semantic Scholar 統一去重）。
     回傳與 Step 1 相容的 dict 清單（含 pmcid 與 doi）。
-    支援傳入 known_keys / needs_backfill 進行搜尋過程即時去重與 PMCID 回補。
+    支援傳入 known_keys / needs_backfill 進行搜尋過程即時去重與 PMCID 回補，
+    以及 start_cursor / cursor_out 支援跨次接續翻頁與耗盡偵測。
     """
     limit = EUROPEPMC_MAX_PAPERS if max_papers is None else max_papers
     if limit <= 0:
@@ -318,7 +321,8 @@ def search_europepmc_metadata(
 
     active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
     query = build_europepmc_query(modes=active_modes)
-    print(f"\n[Europe PMC] Searching open-access papers (modes={','.join(active_modes)}, limit={limit})...")
+    resume_note = " [續頁]" if (start_cursor and start_cursor != "*") else ""
+    print(f"\n[Europe PMC] Searching open-access papers{resume_note} (modes={','.join(active_modes)}, limit={limit})...")
     print(f"  Query: {query}")
 
     target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
@@ -330,117 +334,137 @@ def search_europepmc_metadata(
     backfill_count = 0
     pages_scanned = 0
     empty_pages = 0
-    cursor_mark = "*"
+    cursor_mark = start_cursor or "*"
+    next_cursor_to_save: str | None = cursor_mark if cursor_mark != "*" else None
+    exhausted = False
 
-    while new_count < limit:
-        page_size = 100 if inflight else min(100, limit - new_count)
-        try:
-            resp = _epmc_get_with_retry(
-                EPMC_SEARCH_URL,
-                params={
-                    "query": query,
-                    "format": "json",
-                    "resultType": "core",
-                    "pageSize": page_size,
-                    "cursorMark": cursor_mark,
-                },
-                timeout=REQUEST_TIMEOUT,
-            )
-            if resp is None:
-                print("  ⚠️ Europe PMC search failed after retries.")
-                break
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            print(f"  ⚠️ Europe PMC search error: {e}")
-            break
-
-        results = data.get("resultList", {}).get("result", [])
-        if not results:
-            break
-
-        page_new = 0
-        for item in results:
-            pmcid = item.get("pmcid")
-            if not pmcid or pmcid in seen_pmcids:
-                continue
-            title = item.get("title") or ""
-            abstract = item.get("abstractText") or ""
-            if target_pat is not None:
-                if not target_pat.search(f"{title} {abstract}"):
+    try:
+        while new_count < limit:
+            page_size = 100 if inflight else min(100, limit - new_count)
+            try:
+                resp = _epmc_get_with_retry(
+                    EPMC_SEARCH_URL,
+                    params={
+                        "query": query,
+                        "format": "json",
+                        "resultType": "core",
+                        "pageSize": page_size,
+                        "cursorMark": cursor_mark,
+                    },
+                    timeout=REQUEST_TIMEOUT,
+                )
+                if resp is None:
+                    print("  ⚠️ Europe PMC search failed after retries.")
+                    break
+                if getattr(resp, "status_code", None) == 400 and cursor_mark != "*" and pages_scanned == 0:
+                    print("  ⚠️ Europe PMC 既有游標已失效，自動重設為從頭掃描 (*)")
+                    cursor_mark = "*"
+                    next_cursor_to_save = None
                     continue
-            seen_pmcids.add(pmcid)
-            raw_doi = (item.get("doi") or "").strip()
-            doi_url = (
-                raw_doi
-                if (not raw_doi or raw_doi.startswith("http"))
-                else f"https://doi.org/{raw_doi}"
-            ) or None
-            pub_year = item.get("pubYear")
-            year_val = int(pub_year) if str(pub_year).isdigit() else None
-            rec = {
-                "query": query,
-                "openalex_id": None,
-                "s2_paper_id": None,
-                "pmcid": pmcid,
-                "source_api": "europepmc",
-                "doi": doi_url,
-                "title": title,
-                "year": year_val,
-                "journal": item.get("journalTitle"),
-                "is_oa": True,
-                "oa_status": "europepmc",
-                "oa_url": f"https://europepmc.org/article/PMC/{pmcid}",
-                "best_pdf_url": None,
-                "primary_pdf_url": None,
-                "cited_by_count": item.get("citedByCount"),
-                "authors": item.get("authorString"),
-                "abstract": abstract,
-            }
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                print(f"  ⚠️ Europe PMC search error: {e}")
+                break
 
-            key = make_record_key(doi_url, pmcid)
-            if inflight and key and key in known_keys:
-                skipped_dup += 1
-                missing = needs_backfill.get(key) if needs_backfill is not None else None
-                if missing:
-                    can_fill_pmcid = "pmcid" in missing
-                    can_fill_abs = ("abstract" in missing) and bool(abstract.strip())
-                    if can_fill_pmcid or can_fill_abs:
-                        records.append(rec)
-                        backfill_count += 1
-                        if can_fill_pmcid:
-                            missing.discard("pmcid")
-                        if can_fill_abs:
-                            missing.discard("abstract")
-                        if not missing:
-                            needs_backfill.pop(key, None)
-                continue
+            results = data.get("resultList", {}).get("result", [])
+            if not results:
+                exhausted = True
+                next_cursor_to_save = None
+                break
 
-            records.append(rec)
-            new_count += 1
-            page_new += 1
-            if inflight and key:
-                known_keys.add(key)
+            page_new = 0
+            for item in results:
+                pmcid = item.get("pmcid")
+                if not pmcid or pmcid in seen_pmcids:
+                    continue
+                title = item.get("title") or ""
+                abstract = item.get("abstractText") or ""
+                if target_pat is not None:
+                    if not target_pat.search(f"{title} {abstract}"):
+                        continue
+                seen_pmcids.add(pmcid)
+                raw_doi = (item.get("doi") or "").strip()
+                doi_url = (
+                    raw_doi
+                    if (not raw_doi or raw_doi.startswith("http"))
+                    else f"https://doi.org/{raw_doi}"
+                ) or None
+                pub_year = item.get("pubYear")
+                year_val = int(pub_year) if str(pub_year).isdigit() else None
+                rec = {
+                    "query": query,
+                    "openalex_id": None,
+                    "s2_paper_id": None,
+                    "pmcid": pmcid,
+                    "source_api": "europepmc",
+                    "doi": doi_url,
+                    "title": title,
+                    "year": year_val,
+                    "journal": item.get("journalTitle"),
+                    "is_oa": True,
+                    "oa_status": "europepmc",
+                    "oa_url": f"https://europepmc.org/article/PMC/{pmcid}",
+                    "best_pdf_url": None,
+                    "primary_pdf_url": None,
+                    "cited_by_count": item.get("citedByCount"),
+                    "authors": item.get("authorString"),
+                    "abstract": abstract,
+                }
+
+                key = make_record_key(doi_url, pmcid)
+                if inflight and key and key in known_keys:
+                    skipped_dup += 1
+                    missing = needs_backfill.get(key) if needs_backfill is not None else None
+                    if missing:
+                        can_fill_pmcid = "pmcid" in missing
+                        can_fill_abs = ("abstract" in missing) and bool(abstract.strip())
+                        if can_fill_pmcid or can_fill_abs:
+                            records.append(rec)
+                            backfill_count += 1
+                            if can_fill_pmcid:
+                                missing.discard("pmcid")
+                            if can_fill_abs:
+                                missing.discard("abstract")
+                            if not missing:
+                                needs_backfill.pop(key, None)
+                    continue
+
+                records.append(rec)
+                new_count += 1
+                page_new += 1
+                if inflight and key:
+                    known_keys.add(key)
+
+                if new_count >= limit:
+                    break
+
+            pages_scanned += 1
+            empty_pages = (empty_pages + 1) if page_new == 0 else 0
+
+            next_cursor = data.get("nextCursorMark")
+            if not next_cursor or next_cursor == cursor_mark:
+                exhausted = True
+                next_cursor_to_save = None
+            else:
+                next_cursor_to_save = next_cursor
 
             if new_count >= limit:
                 break
+            if inflight:
+                if early_stop > 0 and empty_pages >= early_stop:
+                    break
+                if pages_scanned >= max_pages:
+                    break
 
-        pages_scanned += 1
-        empty_pages = (empty_pages + 1) if page_new == 0 else 0
-
-        if new_count >= limit:
-            break
-        if inflight:
-            if early_stop > 0 and empty_pages >= early_stop:
+            if not next_cursor or next_cursor == cursor_mark:
                 break
-            if pages_scanned >= max_pages:
-                break
-
-        next_cursor = data.get("nextCursorMark")
-        if not next_cursor or next_cursor == cursor_mark:
-            break
-        cursor_mark = next_cursor
-        time.sleep(EUROPEPMC_DELAY)
+            cursor_mark = next_cursor
+            time.sleep(EUROPEPMC_DELAY)
+    finally:
+        if cursor_out is not None:
+            cursor_out["next_cursor"] = None if exhausted else next_cursor_to_save
+            cursor_out["exhausted"] = exhausted
 
     if inflight:
         bf_msg = f", backfill {backfill_count}" if backfill_count else ""

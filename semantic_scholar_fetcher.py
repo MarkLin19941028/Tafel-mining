@@ -288,17 +288,27 @@ def build_grouped_s2_queries(modes: list[str] | tuple[str, ...] | str | None = N
     return grouped
 
 
+def _is_openalex_grouped_queries(queries: list[str]) -> bool:
+    """偵測傳入的是否為 OpenAlex 布林濃縮查詢（含 AND / OR），避免誤當成 S2 測試查詢直通。"""
+    return any((" AND " in q or " OR " in q) for q in queries)
+
+
 def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
     """
     選擇要送往 Semantic Scholar 的查詢清單：
-    - 若啟用 use_bulk 且傳入的是完整展開查詢清單（> 8 組），自動使用 build_grouped_s2_queries() 濃縮為 5~7 組布林查詢。
-    - 若呼叫端只傳入少量測試查詢（<= 8 組），則直接正規化後執行。
+    - 若啟用 use_bulk 且傳入的是完整展開查詢清單（> 8 組）或 OpenAlex 布林濃縮查詢，
+      自動使用 build_grouped_s2_queries() 濃縮為 5~7 組 S2 專屬布林查詢（+ / | 語法）。
+    - 若呼叫端只傳入少量測試查詢（<= 8 組且非 OpenAlex 布林語法），則直接正規化後執行。
     """
-    if use_bulk and len(queries) > 8:
+    if use_bulk and (len(queries) > 8 or _is_openalex_grouped_queries(queries)):
         grouped = build_grouped_s2_queries()
-        print(
-            f"  [S2] 已將 {len(queries)} 組展開關鍵字濃縮為 {len(grouped)} 組高密度布林查詢（減少 ~{100 - int(len(grouped)/len(queries)*100)}% API 請求）"
-        )
+        if len(queries) > len(grouped):
+            reduction = 100 - int(len(grouped) / len(queries) * 100)
+            print(
+                f"  [S2] 已將 {len(queries)} 組查詢濃縮為 {len(grouped)} 組高密度布林查詢（減少 ~{reduction}% API 請求）"
+            )
+        else:
+            print(f"  [S2] 使用 {len(grouped)} 組 S2 專屬高密度布林查詢（/search/bulk）")
         return grouped
 
     seen: set[str] = set()
@@ -651,10 +661,11 @@ def search_semantic_scholar(
     from_year = from_year or FROM_YEAR
     if append is None:
         append = os.environ.get("TAFEL_APPEND") == "1"
-    use_bulk = bool(getattr(config, "SEMANTIC_SCHOLAR_USE_BULK", True)) and len(queries) > 1
+    is_full_pipeline = (len(queries) > 1) or _is_openalex_grouped_queries(queries)
+    use_bulk = bool(getattr(config, "SEMANTIC_SCHOLAR_USE_BULK", True)) and is_full_pipeline
     if use_cache is None:
-        # 當執行完整 pipeline (len(queries) > 1) 且未設定強制刷快取時啟用本地快取
-        use_cache = (len(queries) > 1) and (os.environ.get("TAFEL_FORCE_S2_REFRESH") != "1")
+        # 當執行完整 pipeline 且未設定強制刷快取時啟用本地快取
+        use_cache = is_full_pipeline and (os.environ.get("TAFEL_FORCE_S2_REFRESH") != "1")
 
     selected_queries = _select_s2_queries(queries, use_bulk=use_bulk)
 

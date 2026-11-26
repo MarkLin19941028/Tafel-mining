@@ -1322,5 +1322,252 @@ class TestStep1To3Optimizations(unittest.TestCase):
             self.assertEqual(mock_req.call_count, 2)
 
 
+class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
+    def test_step1_cursor_store_and_openalex_epmc_resume_and_exhausted_skip(self):
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        import europepmc_fetcher as epmc
+        import step1_search_openalex as s1
+        from step1_cursor_state import Step1CursorStore, make_cursor_key
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = os.path.join(tmpdir, "cu_step1_cursor_state.json")
+            out_csv = os.path.join(tmpdir, "cu_meta.csv")
+            store = Step1CursorStore(state_path)
+
+            k_done = make_cursor_key("openalex", "q_done", s1.FROM_YEAR)
+            k_resume = make_cursor_key("openalex", "q_resume", s1.FROM_YEAR)
+            store.update(k_done, None, exhausted=True)
+            store.update(k_resume, "cursor_p2", exhausted=False)
+
+            reloaded = Step1CursorStore(state_path)
+            self.assertEqual(reloaded.get(k_done), (None, True))
+            self.assertEqual(reloaded.get(k_resume), ("cursor_p2", False))
+
+            seen_cursors: list[str] = []
+
+            def _oa_item(oid, doi):
+                return {
+                    "id": oid,
+                    "doi": doi,
+                    "title": f"Copper corrosion {oid}",
+                    "publication_year": 2024,
+                    "primary_location": {"source": {"display_name": "Corr. Sci."}, "pdf_url": None},
+                    "best_oa_location": {"pdf_url": "https://ex.org/p.pdf"},
+                    "open_access": {"is_oa": True, "oa_status": "gold", "oa_url": "https://ex.org/p.pdf"},
+                    "abstract_inverted_index": {"Copper": [0], "Tafel": [1]},
+                    "cited_by_count": 5,
+                    "authorships": [{"author": {"display_name": "Alice"}}],
+                }
+
+            def _fake_oa_req(url, params):
+                seen_cursors.append(params["cursor"])
+                r = MagicMock()
+                r.json.return_value = {
+                    "results": [_oa_item("W20", "https://doi.org/10.1000/p20")],
+                    "meta": {"next_cursor": None},
+                }
+                return r
+
+            with patch.object(s1, "STEP1_CURSOR_STATE_PATH", state_path), \
+                 patch.object(s1, "STEP1_OUTPUT", out_csv), \
+                 patch.object(s1, "SEARCH_QUERIES", ["q_done", "q_resume"]), \
+                 patch.object(s1, "MAX_RECORDS_PER_QUERY", 10), \
+                 patch.object(s1, "ENABLE_OPENALEX", True), \
+                 patch.object(s1, "ENABLE_SEMANTIC_SCHOLAR", False), \
+                 patch.object(s1, "ENABLE_EUROPEPMC_XML", False), \
+                 patch.object(s1, "request_with_retry", side_effect=_fake_oa_req), \
+                 patch.object(s1.time, "sleep"):
+                df = s1.run_search(append=True)
+
+            # q_done was exhausted -> 0 API calls; q_resume started at cursor_p2 -> now exhausted
+            self.assertEqual(seen_cursors, ["cursor_p2"])
+            self.assertEqual(len(df), 1)
+            after = Step1CursorStore(state_path)
+            self.assertEqual(after.get(k_resume), (None, True))
+
+            # OpenAlex HTTP 400 invalid cursor automatically falls back to "*"
+            oa_fallback_cursors: list[str] = []
+
+            def _oa_400_then_ok(url, params):
+                oa_fallback_cursors.append(params["cursor"])
+                if params["cursor"] == "expired_cur":
+                    raise s1.OpenAlexInvalidCursorError("expired")
+                r = MagicMock()
+                r.json.return_value = {
+                    "results": [_oa_item("W21", "https://doi.org/10.1000/p21")],
+                    "meta": {"next_cursor": "fresh_c2"},
+                }
+                return r
+
+            cbox: dict = {}
+            with patch.object(s1, "request_with_retry", side_effect=_oa_400_then_ok), \
+                 patch.object(s1.time, "sleep"):
+                recs = s1.fetch_single_query(
+                    '"copper" "Tafel"',
+                    max_records=1,
+                    known_keys=set(),
+                    needs_backfill={},
+                    start_cursor="expired_cur",
+                    cursor_out=cbox,
+                )
+            self.assertEqual(oa_fallback_cursors, ["expired_cur", "*"])
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(cbox, {"next_cursor": "fresh_c2", "exhausted": False})
+
+            # Europe PMC HTTP 400 invalid cursor falls back to "*" and reports exhausted when nextCursorMark repeats
+            epmc_cursors: list[str] = []
+
+            def _epmc_400_then_ok(url, params=None, timeout=30):
+                epmc_cursors.append(params["cursorMark"])
+                r = MagicMock()
+                if params["cursorMark"] == "bad_epmc_cursor":
+                    r.status_code = 400
+                    return r
+                r.status_code = 200
+                r.raise_for_status.return_value = None
+                r.json.return_value = {
+                    "resultList": {
+                        "result": [
+                            {"pmcid": "PMC777", "doi": "10.1000/epmc777", "title": "Copper corrosion", "abstractText": "Cu Tafel", "pubYear": "2024"}
+                        ]
+                    },
+                    "nextCursorMark": params["cursorMark"],
+                }
+                return r
+
+            epmc_box: dict = {}
+            with patch.object(epmc.requests, "get", side_effect=_epmc_400_then_ok), \
+                 patch.object(epmc.time, "sleep"):
+                epmc_recs = epmc.search_europepmc_metadata(
+                    max_papers=5,
+                    modes=["corrosion"],
+                    known_keys=set(),
+                    needs_backfill={},
+                    start_cursor="bad_epmc_cursor",
+                    cursor_out=epmc_box,
+                )
+            self.assertEqual(epmc_cursors, ["bad_epmc_cursor", "*"])
+            self.assertEqual(len(epmc_recs), 1)
+            self.assertEqual(epmc_box, {"next_cursor": None, "exhausted": True})
+
+    def test_openalex_grouped_queries_reduction_and_s2_detection(self):
+        import config
+        import semantic_scholar_fetcher as s2f
+
+        grouped_all = config.build_search_queries(["corrosion", "cmp_etch", "inhibitor", "solvent"], grouped=True)
+        expanded_all = config.build_search_queries(["corrosion", "cmp_etch", "inhibitor", "solvent"], grouped=False)
+        self.assertLess(len(grouped_all), 25)
+        self.assertGreater(len(expanded_all), 80)
+        self.assertTrue(any(" AND " in q and " OR " in q for q in grouped_all))
+
+        # S2 must recognize short grouped OpenAlex queries (e.g. solvent = 2 queries) and build S2 +/-/| queries
+        oa_solvent = config.build_search_queries(["solvent"], grouped=True)
+        self.assertLessEqual(len(oa_solvent), 4)
+        self.assertTrue(s2f._is_openalex_grouped_queries(oa_solvent))
+        s2_selected = s2f._select_s2_queries(oa_solvent, use_bulk=True)
+        self.assertTrue(all(" + " in q for q in s2_selected))
+        self.assertFalse(any(" AND " in q for q in s2_selected))
+
+    def test_openalex_quota_exhausted_graceful_degradation_and_skip_flag(self):
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        import europepmc_fetcher as epmc
+        import run_all
+        import semantic_scholar_fetcher as s2f
+        import step1_search_openalex as s1
+        from step1_cursor_state import Step1CursorStore, make_cursor_key
+
+        # 1. request_with_retry raises OpenAlexQuotaExhaustedError on 429 insufficient budget
+        r429 = MagicMock(status_code=429, headers={"Retry-After": "36000"})
+        r429.json.return_value = {"message": "Insufficient budget for daily quota"}
+        with patch.object(s1._SESSION, "get", return_value=r429):
+            with self.assertRaises(s1.OpenAlexQuotaExhaustedError):
+                s1.request_with_retry(s1.BASE_URL, {"search": "test"})
+
+        # 2. run_search gracefully degrades on OpenAlexQuotaExhaustedError:
+        #    saves partial OA records + resume cursor, writes batch marker, and still runs S2 + EPMC
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_csv = os.path.join(tmpdir, "cu_meta.csv")
+            state_path = os.path.join(tmpdir, "cu_cursor.json")
+            marker_path = os.path.join(tmpdir, "oa_quota.flag")
+
+            def _fake_oa_fetch(q, max_records, **kwargs):
+                cbox = kwargs.get("cursor_out")
+                if cbox is not None:
+                    cbox["next_cursor"] = "saved_mid_cursor"
+                    cbox["exhausted"] = False
+                raise s1.OpenAlexQuotaExhaustedError("OpenAlex 每日配額已耗盡")
+
+            fake_s2_rec = {
+                "query": "s2_q",
+                "openalex_id": None,
+                "s2_paper_id": "S2_1",
+                "pmcid": None,
+                "source_api": "semantic_scholar",
+                "doi": "https://doi.org/10.1000/s2_only",
+                "title": "Copper Tafel S2",
+                "year": 2024,
+                "journal": "J",
+                "is_oa": True,
+                "oa_status": "gold",
+                "oa_url": None,
+                "best_pdf_url": "https://ex.org/s2.pdf",
+                "primary_pdf_url": None,
+                "cited_by_count": 3,
+                "authors": "Bob",
+                "abstract": "Copper polarization",
+            }
+            fake_epmc_rec = {
+                **fake_s2_rec,
+                "s2_paper_id": None,
+                "pmcid": "PMC888",
+                "source_api": "europepmc",
+                "doi": "https://doi.org/10.1000/epmc_only",
+            }
+
+            with patch.dict(os.environ, {"TAFEL_OA_QUOTA_MARKER": marker_path}), \
+                 patch.object(s1, "STEP1_OUTPUT", out_csv), \
+                 patch.object(s1, "STEP1_CURSOR_STATE_PATH", state_path), \
+                 patch.object(s1, "SEARCH_QUERIES", ["q1"]), \
+                 patch.object(s1, "MAX_RECORDS_PER_QUERY", 10), \
+                 patch.object(s1, "ENABLE_OPENALEX", True), \
+                 patch.object(s1, "ENABLE_SEMANTIC_SCHOLAR", True), \
+                 patch.object(s1, "ENABLE_EUROPEPMC_XML", True), \
+                 patch.object(s1, "fetch_single_query", side_effect=_fake_oa_fetch), \
+                 patch.object(s2f, "search_semantic_scholar", return_value=[fake_s2_rec]) as mock_s2, \
+                 patch.object(epmc, "search_europepmc_metadata", return_value=[fake_epmc_rec]) as mock_epmc:
+                df = s1.run_search(append=True)
+
+            self.assertEqual(mock_s2.call_count, 1)
+            self.assertEqual(mock_epmc.call_count, 1)
+            self.assertTrue(os.path.exists(marker_path))
+            self.assertTrue(os.path.exists(out_csv))
+            self.assertEqual(len(df), 2)
+            # Mid-query cursor was preserved
+            saved_store = Step1CursorStore(state_path)
+            self.assertEqual(
+                saved_store.get(make_cursor_key("openalex", "q1", s1.FROM_YEAR)),
+                ("saved_mid_cursor", False),
+            )
+
+            # 3. skip_openalex=True skips OA completely and still runs S2
+            with patch.object(s1, "STEP1_OUTPUT", out_csv), \
+                 patch.object(s1, "STEP1_CURSOR_STATE_PATH", state_path), \
+                 patch.object(s1, "SEARCH_QUERIES", ["q1"]), \
+                 patch.object(s1, "ENABLE_OPENALEX", True), \
+                 patch.object(s1, "ENABLE_SEMANTIC_SCHOLAR", True), \
+                 patch.object(s1, "ENABLE_EUROPEPMC_XML", False), \
+                 patch.object(s1, "fetch_single_query") as mock_oa_skip, \
+                 patch.object(s2f, "search_semantic_scholar", return_value=[fake_s2_rec]):
+                s1.run_search(append=True, skip_openalex=True)
+            self.assertEqual(mock_oa_skip.call_count, 0)
+
+        # 4. CLI --skip-openalex flag
+        parser = run_all.build_cli_parser()
+        parsed = parser.parse_args(["WN", "--append", "--skip-openalex"])
+        self.assertTrue(parsed.skip_openalex)
+
+
 if __name__ == "__main__":
     unittest.main()
