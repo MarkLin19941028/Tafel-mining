@@ -13,4 +13,3 @@ __pycache__/
 # Large data directories
 data/*
 !data/merged/
-old data/
