@@ -24,7 +24,7 @@ STEP1_EARLY_STOP_EMPTY_PAGES: int = 2    # 連續幾頁無新論文即提前結�
 
 # ✏️ OpenAlex 每組關鍵字最多抓取篇數
 #    測試建議 50，正式建議 200~300（稀缺材料可調至 500）
-MAX_RECORDS_PER_QUERY: int = 300
+MAX_RECORDS_PER_QUERY: int = 100
 
 # ✏️ Step 2 Unpaywall 最佳化設定
 #    True = 若 OpenAlex / Semantic Scholar 已有 PDF URL 則跳過 Unpaywall（實測 99.8% 重複，可加速 20~50 倍）

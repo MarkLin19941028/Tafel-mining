@@ -98,7 +98,11 @@ def merge_csvs(filename: str, id_col: str = None) -> pd.DataFrame:
         target_file = extracted_dir / f"{prefix}_{filename}"
 
         if target_file.exists():
-            df = pd.read_csv(target_file)
+            try:
+                df = pd.read_csv(target_file)
+            except pd.errors.EmptyDataError:
+                print(f"  {metal}: {target_file.name} is empty (no columns), skipping")
+                continue
             df["_source_metal"] = metal
             frames.append(df)
             print(f"  {metal}: {len(df)} rows from {target_file.name}")
@@ -363,7 +367,10 @@ def harvest_cross_metal_and_raw_records(
             raw_path = MINING_DATA_DIR / metal / "extracted" / f"{metal.lower()}_raw_records.csv"
             if not raw_path.exists():
                 continue
-            df_r = pd.read_csv(raw_path)
+            try:
+                df_r = pd.read_csv(raw_path)
+            except pd.errors.EmptyDataError:
+                continue
             for _, row in df_r.iterrows():
                 rec = row.to_dict()
                 for k, v in list(rec.items()):
