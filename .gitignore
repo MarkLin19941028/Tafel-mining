@@ -11,5 +11,6 @@ __pycache__/
 .env
 
 # Large data directories
-data/
+data/*
+!data/merged/
 old data/
