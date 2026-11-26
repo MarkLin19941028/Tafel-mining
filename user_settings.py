@@ -19,12 +19,12 @@ SKIP_EXISTING_STEP2: bool = True
 
 # ✏️ Step 1 搜尋過程中即時比對去重（跳過既有 metadata 與本次已見論文，兼顧效能與增量效益）
 STEP1_INFLIGHT_DEDUP: bool = True
-STEP1_MAX_SCAN_MULTIPLIER: int = 3       # 單組查詢最大翻頁倍率（避免無限翻頁消耗配額）
-STEP1_EARLY_STOP_EMPTY_PAGES: int = 2    # 連續幾頁無新論文即提前結束該組查詢
+STEP1_MAX_SCAN_MULTIPLIER: int = 1       # 單組查詢最大翻頁倍率（避免無限翻頁消耗配額）
+STEP1_EARLY_STOP_EMPTY_PAGES: int = 1    # 連續幾頁無新論文即提前結束該組查詢
 
 # ✏️ OpenAlex 每組關鍵字最多抓取篇數
 #    測試建議 50，正式建議 200~300（稀缺材料可調至 500）
-MAX_RECORDS_PER_QUERY: int = 100
+MAX_RECORDS_PER_QUERY: int = 0
 
 # ✏️ Step 2 Unpaywall 最佳化設定
 #    True = 若 OpenAlex / Semantic Scholar 已有 PDF URL 則跳過 Unpaywall（實測 99.8% 重複，可加速 20~50 倍）
