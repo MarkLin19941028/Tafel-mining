@@ -313,5 +313,20 @@
     "mp_oxide_formation_energy_eV_atom": -2.1909,
     "mp_oxide_E0_V_SHE": -0.2314,
     "mp_backend": "rest_v2"
+  },
+  "MoN": {
+    "query_formula": "MoN",
+    "base_element": "Mo",
+    "mp_material_id": "mp-aaaaaeed",
+    "mp_formation_energy_eV_atom": -0.5462204187499999,
+    "mp_band_gap_eV": 0.0,
+    "mp_density_g_cm3": 9.06055278195652,
+    "mp_work_function_eV": 4.1102,
+    "mp_surface_energy_J_m2": 2.9108,
+    "mp_oxide_formula": "MoO2",
+    "mp_oxide_material_id": "mp-aaabfvdk",
+    "mp_oxide_formation_energy_eV_atom": -2.1055,
+    "mp_oxide_E0_V_SHE": -0.35,
+    "mp_backend": "rest_v2"
   }
 }
