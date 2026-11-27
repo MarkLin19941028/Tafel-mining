@@ -25,10 +25,12 @@ import sys
 BASE_DIR = Path(__file__).resolve().parent
 
 # === 可自定義設定區 ===
-DEFAULT_METALS = ["Cu", "Co", "W", "Ru", "Ti", "TiN", "TaN", "WN", "MoN", "Al", "Ta", "Mn", "Mo"]  # 目標金屬與氮化物清單（需存在於 metals_db.json）；建議維持此 13 種目標材料，或依研究需求增減
+DEFAULT_METALS = ["Co", "W", "Ru", "Ti", "TiN", "TaN", "WN", "MoN", "Al", "Ta", "Mn", "Mo"]  
+# 目標金屬與氮化物清單（需存在於 metals_db.json）；建議維持此 13 種目標材料，或依研究需求增減
+# "Cu", "Co", "W", "Ru", "Ti", "TiN", "TaN", "WN", "MoN", "Al", "Ta", "Mn", "Mo"
 DEFAULT_SEARCH_MODES = ["solvent", "corrosion", "cmp_etch", "inhibitor"]  # 傳給 run_all.py --search-mode 的檢索模式；建議保留全 4 種以最大化覆蓋率，若只看特定領域可縮減為 1~2 種
-DEFAULT_THRESHOLD = 3000  # 單一金屬累計筆數達標門檻（達此值將於下一輪從 run_all.py 指令中剔除）；建議 3000~5000（快速建模建議 3000，完整訓練集建議 5000，深度擴充可用 8000~10000）
-DEFAULT_ROUNDS = 20  # 自動執行總輪數（每輪依序執行：備份 -> run_all.py -> 檢查與記錄報告）；建議先設 2~3（單輪耗時較長，建議 2 輪後再視成長幅度與硬碟空間調整）
+DEFAULT_THRESHOLD = 1000  # 單一金屬累計筆數達標門檻（達此值將於下一輪從 run_all.py 指令中剔除）；建議 3000~5000（快速建模建議 3000，完整訓練集建議 5000，深度擴充可用 8000~10000）
+DEFAULT_ROUNDS = 50  # 自動執行總輪數（每輪依序執行：備份 -> run_all.py -> 檢查與記錄報告）；建議先設 2~3（單輪耗時較長，建議 2 輪後再視成長幅度與硬碟空間調整）
 
 MERGED_DIR = BASE_DIR / "data" / "merged"  # step6/step7 合併輸出與每輪備份的來源資料夾；建議維持 BASE_DIR / "data" / "merged"
 OLD_DATA_DIR = BASE_DIR / "old data"  # 歷史備份資料夾（會在底下建立 yyyymmdd-hhmm 子資料夾）；建議維持 BASE_DIR / "old data"（若本機空間不足可改為外接硬碟路徑）
