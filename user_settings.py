@@ -128,11 +128,11 @@ TAFEL_MAX: float = 500
 # ✏️ Step 5 內文正則擷取時的前後文視窗字元數
 CONTEXT_WINDOW: int = 150
 
-# ✏️ True = 自動濾除超出物理合理區間的離群值（被濾除筆數會另存於 *_filtered_outliers.csv）
-FILTER_OUTLIERS: bool = True
+# ✏️ False = 讓 Step 5 保留所有紀錄交由 Step 6b 統一做非破壞性品管標記（True = 在 Step 5 實體濾除至 *_filtered_outliers.csv）
+FILTER_OUTLIERS: bool = False
 
-# ✏️ icorr (µA/cm²) 合理物理區間（各金屬 Ecorr 合理區間請見 metals_db.json）
-ICORR_VALID_RANGE_UA_CM2: tuple[float, float] = (1e-4, 1e6)
+# ✏️ icorr (µA/cm²) 合理物理區間（各金屬 Ecorr 合理區間請見 metals_db.json；完整基準見 reference_benchmarks.json）
+ICORR_VALID_RANGE_UA_CM2: tuple[float, float] = (1e-4, 1e4)
 
 # ✏️ True = 最終資料表僅保留目標金屬本身的記錄（排除同篇論文對照組中的其他金屬）
 KEEP_ONLY_TARGET_METAL: bool = False

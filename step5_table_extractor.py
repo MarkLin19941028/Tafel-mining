@@ -10,6 +10,7 @@ import numpy as np
 
 import config
 from step5_constants import (
+    NEGATED_ECORR_HEADER_NOTE,
     convert_log_icorr_to_uA_cm2,
     normalize_ecorr_to_v,
     normalize_icorr_to_uA_cm2,
@@ -43,7 +44,7 @@ _COL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("sample", re.compile(r"\b(?:specimen|sample|electrode|alloy|material|coating|inhibitor|additive|medium|solution|catalyst|system|condition|substrate)\b", re.I)),
     ("Ecorr", re.compile(r"(?:e\s*_?\s*corr|corrosion\s+potential|\bocp\b)", re.I)),
     ("log_icorr", re.compile(r"\b(?:log|lg)\s*\(?\s*[ij]\s*_?\s*corr", re.I)),
-    ("icorr", re.compile(r"(?:[ij]\s*_?\s*corr|corrosion\s+current)", re.I)),
+    ("icorr", re.compile(r"(?:[ij]\s*(?:_?\s*|(?:[×xX*·⋅]\s*)?10\s*(?:\^\s*[+\-]?|[+\-])\s*\d+\s*)corr|corrosion\s+current)", re.I)),
     ("beta_a", re.compile(r"(?:β\s*_?\s*a|\bb\s*_?\s*a\b|anodic\s+(?:tafel|slope))", re.I)),
     ("beta_c", re.compile(r"(?:β\s*_?\s*c|\bb\s*_?\s*c\b|cathodic\s+(?:tafel|slope))", re.I)),
     ("tafel", re.compile(r"(?:tafel\s+slope|\btafel\b)", re.I)),
@@ -53,6 +54,15 @@ _COL_PATTERNS: list[tuple[str, re.Pattern]] = [
 
 _ECHEM_COL_ROLES = {"Ecorr", "log_icorr", "icorr", "beta_a", "beta_c", "tafel", "Rp", "CR"}
 _UNIT_IN_PARENS_RE = re.compile(r"[\(\[]([^\)\]]+)[\)\]]")
+_HEADER_NEG_ECORR_RE = re.compile(r"^\s*[-–−]\s*(?:e\s*_?\s*corr|corrosion\s+potential|\bocp\b)", re.I)
+_HEADER_SCI_SCALE_RE = re.compile(r"(?:[×xX*·⋅]\s*)?10\s*(?:\^\s*[+\-]?|[+\-])\s*\d+")
+_METRIC_NAME_PREFIX_RE = re.compile(
+    r"^(?:[eijv]\s*_?\s*corr|r\s*_?\s*p|e\s*_?\s*(?:b|rp|pit|np|cp)|av\.?|sd|materials?)\b",
+    re.I,
+)
+_CURRENT_DENSITY_UNIT_RE = re.compile(r"(?:a\s*/?\s*cm|a\s*/?\s*mm|a\s*/?\s*m|ma\b|µa\b|ua\b|na\b)", re.I)
+_POTENTIAL_UNIT_RE = re.compile(r"(?:\bmv\b|\bsce\b|\bshe\b|\bnhe\b|\brhe\b|ag\s*/\s*agcl|\bvs\.?\b)", re.I)
+_RESISTANCE_OR_CR_UNIT_RE = re.compile(r"(?:ω|ohm|mm\s*/\s*y|year|mpy)", re.I)
 _TABLE_CAPTION_RE = re.compile(
     r"(?:^|\n)\s*Table\s+(\d+)\s*[\.:\-–—]?\s*([^\n]{5,240}(?:\n[^\n]{1,160})?)",
     re.I,
@@ -91,6 +101,46 @@ def extract_table_captions(body_text: str) -> dict[int, str]:
     return captions
 
 
+def _header_is_negated_ecorr(cell: str) -> bool:
+    """偵測表頭是否寫成 −Ecorr / -Ecorr / –Ecorr（代表表格數值實際為負電位的正數表示）。"""
+    c = normalize_text(str(cell or "")).replace("\n", " ").strip()
+    return bool(_HEADER_NEG_ECORR_RE.match(c))
+
+
+def _is_unit_compatible_with_role(role: str, unit_text: str) -> bool:
+    """檢查單位字串是否與欄位語義相容，避免跨欄誤配單位（如把 µA/cm2 配給 Ecorr）。"""
+    u = normalize_text(str(unit_text or "")).strip()
+    if not u:
+        return False
+    if _METRIC_NAME_PREFIX_RE.match(u):
+        return False
+    if role == "Ecorr":
+        if _CURRENT_DENSITY_UNIT_RE.search(u) or _RESISTANCE_OR_CR_UNIT_RE.search(u):
+            return False
+        return True
+    if role in ("icorr", "log_icorr"):
+        if _POTENTIAL_UNIT_RE.search(u) or _RESISTANCE_OR_CR_UNIT_RE.search(u) or "dec" in u.lower():
+            return False
+        return True
+    if role in ("beta_a", "beta_c", "tafel"):
+        if _CURRENT_DENSITY_UNIT_RE.search(u) or _RESISTANCE_OR_CR_UNIT_RE.search(u):
+            return False
+        return True
+    return True
+
+
+def _prepend_header_sci_scale(header_text: str, unit: str) -> str:
+    """若表頭括號外帶有科學記號倍率（如 10−6），將其補回 unit 前綴。"""
+    if not unit:
+        return unit
+    hdr_norm = normalize_text(header_text).replace("−", "-").replace("–", "-").replace("—", "-")
+    unit_norm = unit.replace("−", "-").replace("–", "-").replace("—", "-")
+    scale_m = _HEADER_SCI_SCALE_RE.search(hdr_norm)
+    if scale_m and not _HEADER_SCI_SCALE_RE.search(unit_norm):
+        return f"{scale_m.group(0).strip()} {unit}".strip()
+    return unit
+
+
 def _classify_table_header(cell: str) -> tuple[str | None, str]:
     c = normalize_text(str(cell or "")).replace("\n", " ").strip()
     if not c:
@@ -104,8 +154,14 @@ def _classify_table_header(cell: str) -> tuple[str | None, str]:
             break
     for role, pat in _COL_PATTERNS:
         if pat.search(c):
+            if role in ("icorr", "log_icorr") and unit:
+                unit = _prepend_header_sci_scale(c, unit)
             return role, unit
     return None, unit
+
+
+classify_table_header = _classify_table_header
+header_is_negated_ecorr = _header_is_negated_ecorr
 
 
 def parse_structured_table(
@@ -149,16 +205,31 @@ def parse_structured_table(
     if header_row_idx is None:
         return []
 
+    header_len = len(table[header_row_idx])
+    negated_ecorr_cols: set[int] = {
+        c_idx
+        for c_idx, (role, _) in col_map.items()
+        if role == "Ecorr"
+        and c_idx < header_len
+        and _header_is_negated_ecorr(table[header_row_idx][c_idx])
+    }
+
     # 若下一列是純單位列（例如 "(mV)", "(mA/cm2)"），合併單位並跳過該列
     data_start = header_row_idx + 1
     if data_start < len(table):
         next_row = table[data_start]
         non_empty = [normalize_text(str(c or "")).strip() for c in next_row if str(c or "").strip()]
         if non_empty and all(parse_scientific(x) is None and len(x) <= 20 for x in non_empty):
+            unit_offset = header_len - len(next_row) if len(next_row) < header_len else 0
             for c_idx, (role, unit) in list(col_map.items()):
-                if not unit and c_idx < len(next_row):
-                    u_txt = normalize_text(str(next_row[c_idx] or "")).strip("()[] ")
-                    if u_txt:
+                if unit:
+                    continue
+                src_idx = c_idx - unit_offset
+                if 0 <= src_idx < len(next_row):
+                    u_txt = normalize_text(str(next_row[src_idx] or "")).strip("()[] ")
+                    if u_txt and _is_unit_compatible_with_role(role, u_txt):
+                        if role in ("icorr", "log_icorr") and c_idx < header_len:
+                            u_txt = _prepend_header_sci_scale(str(table[header_row_idx][c_idx] or ""), u_txt)
                         col_map[c_idx] = (role, u_txt)
             data_start += 1
 
@@ -182,12 +253,13 @@ def parse_structured_table(
         # 若整篇論文只有單一編號表格（例如跨頁拆表或無編號附表），沿用該唯一表題
         table_caption = next(iter(table_captions.values()))
     header_text = " | ".join(normalize_text(str(c or "")) for c in table[header_row_idx])
+    unit_text = " | ".join(u for _, u in col_map.values() if u)
     caption_inhibitors = list(dict.fromkeys(
         normalise_species(m.group("inh"))
         for m in _INHIBITOR_NAME_RE.finditer(f"{header_text} {table_caption}")
     ))
     single_table_inhibitor = caption_inhibitors[0] if len(caption_inhibitors) == 1 else None
-    table_ref = select_ref_electrode([header_text, table_caption], ref_counts)
+    table_ref = select_ref_electrode([header_text, unit_text, table_caption], ref_counts)
     primary_ref = table_ref or (refs[0] if refs else None)
     ordered_refs = (
         [primary_ref] + [r for r in refs if r != primary_ref]
@@ -209,6 +281,10 @@ def parse_structured_table(
     carry_sample_name: str | None = None
     for row_offset, row in enumerate(table[data_start:], start=1):
         norm_row = [normalize_text(str(c or "")).replace("\n", " ").strip() for c in row]
+        rowspan_padded = False
+        if sample_col == 0 and len(norm_row) == header_len - 1 and carry_sample_name is not None:
+            norm_row = [""] + norm_row
+            rowspan_padded = True
         row_text = " | ".join(norm_row)
         raw_sample = norm_row[sample_col] if (sample_col is not None and sample_col < len(norm_row)) else None
         if raw_sample == "":
@@ -220,7 +296,7 @@ def parse_structured_table(
                 carry_sample_name = raw_sample
             else:
                 carry_sample_name = None
-        elif conc_info is not None and carry_sample_name is not None:
+        elif (conc_info is not None or rowspan_padded) and carry_sample_name is not None:
             raw_sample = carry_sample_name
 
         sample_name = raw_sample
@@ -262,6 +338,9 @@ def parse_structured_table(
                 continue
 
             if role == "Ecorr":
+                if c_idx in negated_ecorr_cols and val > 0:
+                    val = -val
+                    rec_notes.append(NEGATED_ECORR_HEADER_NOTE)
                 v, warn = normalize_ecorr_to_v(val, unit)
                 ecorr_v_orig = v
                 ecorr_raw = cell_str

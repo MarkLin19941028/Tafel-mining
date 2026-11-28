@@ -197,9 +197,25 @@ def run_batch(
             print(f"\n❌ Step 6 Merge 失敗 ({type(e).__name__}: {e})")
             merge_ok = False
 
+    # Step 6b：非破壞性資料清洗、異常標記與權威基準驗證
+    clean_ok = True
+    if run_merge and merge_ok:
+        print("\n" + "=" * 65)
+        print("  Step 6b: Clean & validate database against reference benchmarks")
+        print("=" * 65)
+        try:
+            import step6b_clean_and_validate
+
+            step6b_clean_and_validate.run_clean_and_validate(settings=resolved_settings)
+        except SystemExit as e:
+            clean_ok = (e.code == 0 or e.code is None)
+        except Exception as e:
+            print(f"\n❌ Step 6b Clean/Validate 失敗 ({type(e).__name__}: {e})")
+            clean_ok = False
+
     # Step 7：物理與 Pourbaix 熱力學特徵強化（Materials Project API + 內建熱力學表）
     enrich_ok = True
-    if run_enrich and merge_ok:
+    if run_enrich and merge_ok and clean_ok:
         print("\n" + "=" * 65)
         print("  Step 7: Enrich physical & Pourbaix thermodynamic features")
         print("=" * 65)
@@ -225,11 +241,12 @@ def run_batch(
         print(f"  Succeeded: {ok_count} / {len(summary)}")
     if run_merge:
         print(f"  Step 6 Merge : {'✅ OK' if merge_ok else '❌ FAILED'}")
+        print(f"  Step 6b Clean: {'✅ OK' if clean_ok else '❌ FAILED'}")
     if run_enrich:
         print(f"  Step 7 Enrich: {'✅ OK' if enrich_ok else '❌ FAILED'}")
     print("=" * 65)
 
-    return 0 if (ok_count == len(summary) and merge_ok and enrich_ok) else 1
+    return 0 if (ok_count == len(summary) and merge_ok and clean_ok and enrich_ok) else 1
 
 
 def build_cli_parser() -> argparse.ArgumentParser:

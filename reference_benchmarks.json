@@ -1,0 +1,377 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "reference_condition": "25C, aerated neutral aqueous (3.5% NaCl / seawater equivalent)",
+    "potential_scale": "V vs SHE",
+    "current_density_unit": "uA/cm2",
+    "global_hard_bounds": {
+      "ecorr_v_she": [-2.0, 1.5],
+      "icorr_uA_cm2": [0.0001, 10000.0]
+    },
+    "global_exclude_keywords": [
+      "HER",
+      "OER",
+      "ORR",
+      "electrocatalyst",
+      "fuel cell",
+      "water splitting",
+      "supercapacitor"
+    ],
+    "sources": [
+      "ASTM G82 / MIL-STD-889 (SCE + 0.241 V -> SHE)",
+      "ASM Handbook Vol. 13A & 13B",
+      "Uhlig's Corrosion Handbook",
+      "Pourbaix Atlas",
+      "ECS (Journal of The Electrochemical Society / JSSST)",
+      "Corrosion Science / Electrochimica Acta",
+      "IEEE TCPMT / Journal of Electronic Materials"
+    ]
+  },
+  "materials": {
+    "Cu": {
+      "category": "BEOL_interconnect",
+      "aliases": ["Copper"],
+      "ecorr_range": [-0.12, 0.10],
+      "icorr_range": [1.0, 15.0],
+      "exclude_keywords": [],
+      "notes": "酸性或含氧化劑體系中 Ecorr 會略偏正"
+    },
+    "Ti": {
+      "category": "BEOL_barrier_liner",
+      "aliases": ["Titanium"],
+      "ecorr_range": [-0.30, 0.30],
+      "icorr_range": [0.05, 1.0],
+      "exclude_keywords": [],
+      "notes": "鈍化態 +0.15~+0.30 V；活化/酸態 -0.30~0.00 V；具 TiO2 鈍化膜"
+    },
+    "Al": {
+      "category": "BEOL_interconnect",
+      "aliases": ["Aluminum", "Aluminium"],
+      "ecorr_range": [-0.76, -0.51],
+      "icorr_range": [1.0, 10.0],
+      "exclude_keywords": ["anodizing", "anodization"],
+      "notes": "需留意陽極處理或非氯介質導致 Ecorr 偏正"
+    },
+    "Fe": {
+      "category": "structural_metal",
+      "aliases": ["Iron", "Carbon Steel"],
+      "ecorr_range": [-0.46, -0.36],
+      "icorr_range": [10.0, 50.0],
+      "exclude_keywords": ["stainless steel", "304", "316L", "316", "passivated"],
+      "notes": "此基準為純鐵/碳鋼；不鏽鋼應另行分類 (Ecorr +0.10~+0.25 V, icorr 0.1~2 uA/cm2)"
+    },
+    "Co": {
+      "category": "BEOL_interconnect_liner",
+      "aliases": ["Cobalt"],
+      "ecorr_range": [-0.30, -0.05],
+      "icorr_range": [1.0, 20.0],
+      "exclude_keywords": [],
+      "notes": "中性至弱鹼鈍化邊界"
+    },
+    "W": {
+      "category": "MOL_BEOL_contact",
+      "aliases": ["Tungsten"],
+      "ecorr_range": [-0.20, 0.10],
+      "icorr_range": [0.5, 10.0],
+      "exclude_keywords": [],
+      "notes": "中性/弱酸具 WO3 鈍化行為，強鹼易溶解"
+    },
+    "Mo": {
+      "category": "BEOL_interconnect_candidate",
+      "aliases": ["Molybdenum"],
+      "ecorr_range": [-0.15, 0.15],
+      "icorr_range": [0.5, 10.0],
+      "exclude_keywords": [],
+      "notes": ""
+    },
+    "Ni": {
+      "category": "UBM_packaging",
+      "aliases": ["Nickel"],
+      "ecorr_range": [-0.15, 0.14],
+      "icorr_range": [0.5, 5.0],
+      "exclude_keywords": [],
+      "notes": ""
+    },
+    "Mg": {
+      "category": "active_metal",
+      "aliases": ["Magnesium"],
+      "ecorr_range": [-1.39, -1.36],
+      "icorr_range": [10.0, 100.0],
+      "ecorr_hard_bounds": [-2.2, 1.5],
+      "exclude_keywords": [],
+      "notes": "極活潑金屬，物理下限可放寬至 -2.2 V"
+    },
+    "Mn": {
+      "category": "BEOL_barrier_dopant",
+      "aliases": ["Manganese"],
+      "ecorr_range": [-0.90, -0.50],
+      "icorr_range": [10.0, 100.0],
+      "exclude_keywords": ["MnO2", "high-Mn steel", "manganese oxide"],
+      "notes": "純 Mn 極活潑，需排除高錳鋼或氧化錳文獻"
+    },
+    "Zn": {
+      "category": "active_metal",
+      "aliases": ["Zinc"],
+      "ecorr_range": [-0.79, -0.74],
+      "icorr_range": [10.0, 50.0],
+      "exclude_keywords": ["Zn-ion battery", "zinc-air"],
+      "notes": ""
+    },
+    "Cr": {
+      "category": "adhesion_layer",
+      "aliases": ["Chromium"],
+      "ecorr_range": [-0.10, 0.20],
+      "icorr_range": [0.1, 5.0],
+      "exclude_keywords": [],
+      "notes": "鈍化態基準"
+    },
+    "Ta": {
+      "category": "BEOL_barrier_liner",
+      "aliases": ["Tantalum"],
+      "ecorr_range": [-0.10, 0.25],
+      "icorr_range": [0.01, 0.5],
+      "exclude_keywords": [],
+      "notes": "強閥金屬，具緻密 Ta2O5 鈍化膜"
+    },
+    "Ru": {
+      "category": "BEOL_interconnect_liner",
+      "aliases": ["Ruthenium"],
+      "ecorr_range": [0.30, 0.60],
+      "icorr_range": [0.01, 1.0],
+      "exclude_keywords": ["HER", "OER", "ORR", "electrocatalyst", "water splitting", "supercapacitor"],
+      "notes": "嚴防電催化與強氧化性 CMP 漿料數據混入"
+    },
+    "TiN": {
+      "category": "BEOL_barrier_hardmask",
+      "aliases": ["Titanium Nitride"],
+      "ecorr_range": [0.05, 0.30],
+      "icorr_range": [0.1, 5.0],
+      "exclude_keywords": [],
+      "notes": "實測 icorr 受薄膜孔隙率影響較大"
+    },
+    "Ag": {
+      "category": "noble_metal",
+      "aliases": ["Silver"],
+      "ecorr_range": [0.10, 0.15],
+      "icorr_range": [0.1, 5.0],
+      "exclude_keywords": [],
+      "notes": ""
+    },
+    "Sn": {
+      "category": "packaging_solder",
+      "aliases": ["Tin"],
+      "ecorr_range": [-0.26, -0.16],
+      "icorr_range": [1.0, 20.0],
+      "exclude_keywords": [],
+      "notes": "需注意是否混入無鉛焊料合金數據"
+    },
+    "Pt": {
+      "category": "noble_metal",
+      "aliases": ["Platinum"],
+      "ecorr_range": [0.40, 0.65],
+      "icorr_range": [0.0001, 0.1],
+      "exclude_keywords": ["HER", "OER", "ORR", "electrocatalyst", "fuel cell", "methanol oxidation"],
+      "notes": "極易受電催化交換電流密度污染"
+    },
+    "Pd": {
+      "category": "noble_metal",
+      "aliases": ["Palladium"],
+      "ecorr_range": [0.35, 0.55],
+      "icorr_range": [0.0001, 0.5],
+      "exclude_keywords": ["HER", "OER", "ORR", "electrocatalyst", "hydrogen absorption"],
+      "notes": ""
+    },
+    "Au": {
+      "category": "noble_metal",
+      "aliases": ["Gold"],
+      "ecorr_range": [0.40, 0.65],
+      "icorr_range": [0.0001, 0.1],
+      "exclude_keywords": ["HER", "OER", "ORR", "electrocatalyst"],
+      "notes": "含錯合劑 (Cl-/CN-) 環境會使 Ecorr 降低、icorr 升高"
+    },
+    "Ir": {
+      "category": "noble_metal",
+      "aliases": ["Iridium"],
+      "ecorr_range": [0.45, 0.70],
+      "icorr_range": [0.0001, 0.1],
+      "exclude_keywords": ["HER", "OER", "ORR", "electrocatalyst", "water splitting"],
+      "notes": ""
+    },
+    "TaN": {
+      "category": "BEOL_barrier_liner",
+      "aliases": ["Tantalum Nitride"],
+      "ecorr_range": [-0.10, 0.25],
+      "icorr_range": [0.05, 2.0],
+      "exclude_keywords": [],
+      "notes": ""
+    },
+    "Pb": {
+      "category": "packaging_solder",
+      "aliases": ["Lead"],
+      "ecorr_range": [-0.31, -0.26],
+      "icorr_range": [1.0, 10.0],
+      "exclude_keywords": ["PbO2", "lead-acid", "battery"],
+      "notes": "嚴防鉛酸電池 PbO2 文獻混入"
+    },
+    "MoN": {
+      "category": "BEOL_barrier_liner",
+      "aliases": ["Molybdenum Nitride"],
+      "ecorr_range": [-0.10, 0.15],
+      "icorr_range": [0.1, 2.0],
+      "exclude_keywords": ["HER", "OER", "supercapacitor"],
+      "notes": ""
+    },
+    "WN": {
+      "category": "BEOL_barrier_liner",
+      "aliases": ["Tungsten Nitride"],
+      "ecorr_range": [-0.20, 0.10],
+      "icorr_range": [0.5, 5.0],
+      "exclude_keywords": ["HER", "OER", "supercapacitor"],
+      "notes": ""
+    },
+    "Rh": {
+      "category": "BEOL_interconnect_candidate",
+      "aliases": ["Rhodium"],
+      "ecorr_range": [0.35, 0.60],
+      "icorr_range": [0.0001, 0.1],
+      "exclude_keywords": ["HER", "OER", "ORR", "electrocatalyst"],
+      "notes": "貴金屬，嚴防電催化文獻拉高 icorr"
+    },
+    "Al-Cu": {
+      "category": "BEOL_bond_pad",
+      "aliases": ["Al-0.5Cu", "Al-1Cu", "AlCu"],
+      "ecorr_range": [-0.60, -0.40],
+      "icorr_range": [2.0, 20.0],
+      "exclude_keywords": [],
+      "notes": "含 Al2Cu 析出相微電偶，icorr 高於純 Al"
+    },
+    "CoWP": {
+      "category": "BEOL_capping_layer",
+      "aliases": ["Co-W-P"],
+      "ecorr_range": [-0.20, 0.05],
+      "icorr_range": [0.5, 10.0],
+      "exclude_keywords": [],
+      "notes": "無電鍍 Cu 蓋層，隨 W/P 含量提高而略微變貴且鈍化增強"
+    },
+    "TiAlN": {
+      "category": "gate_barrier_hardmask",
+      "aliases": ["Ti-Al-N", "AlTiN"],
+      "ecorr_range": [0.05, 0.35],
+      "icorr_range": [0.05, 2.0],
+      "exclude_keywords": [],
+      "notes": "表面 Al2O3/TiO2 混合膜使抗蝕性優於 TiN"
+    },
+    "RuO2": {
+      "category": "BEOL_conductive_oxide",
+      "aliases": ["Ruthenium Dioxide", "Ruthenium Oxide"],
+      "ecorr_range": [0.40, 0.75],
+      "icorr_range": [0.0001, 0.5],
+      "exclude_keywords": ["supercapacitor", "OER", "HER", "electrocatalyst", "pseudocapacitor"],
+      "notes": "嚴防超級電容與 OER 催化文獻污染"
+    },
+    "Nb": {
+      "category": "barrier_superconductor",
+      "aliases": ["Niobium"],
+      "ecorr_range": [-0.15, 0.20],
+      "icorr_range": [0.01, 0.5],
+      "exclude_keywords": [],
+      "notes": "強閥金屬 (Nb2O5 鈍化)，特徵類似 Ta/Ti"
+    },
+    "Zr": {
+      "category": "high_k_precursor",
+      "aliases": ["Zirconium"],
+      "ecorr_range": [-0.20, 0.15],
+      "icorr_range": [0.01, 0.5],
+      "exclude_keywords": [],
+      "notes": "強閥金屬 (ZrO2 鈍化)，含 F- 環境除外"
+    },
+    "NiSi": {
+      "category": "FEOL_MOL_silicide",
+      "aliases": ["Nickel Silicide", "NiSi2"],
+      "ecorr_range": [-0.05, 0.20],
+      "icorr_range": [0.1, 3.0],
+      "exclude_keywords": ["battery", "anode"],
+      "notes": "矽成分促成表面鈍化，較純 Ni 更貴且 icorr 更低"
+    },
+    "CoSi2": {
+      "category": "FEOL_MOL_silicide",
+      "aliases": ["Cobalt Silicide", "CoSi"],
+      "ecorr_range": [-0.05, 0.20],
+      "icorr_range": [0.1, 3.0],
+      "exclude_keywords": ["battery", "anode"],
+      "notes": "抗腐蝕性顯著優於純 Co"
+    },
+    "TiSi2": {
+      "category": "FEOL_MOL_silicide",
+      "aliases": ["Titanium Silicide"],
+      "ecorr_range": [-0.10, 0.20],
+      "icorr_range": [0.05, 2.0],
+      "exclude_keywords": [],
+      "notes": "強鈍化特性，但在含 HF 清洗液中會劇烈蝕刻"
+    },
+    "WSi2": {
+      "category": "FEOL_MOL_silicide",
+      "aliases": ["Tungsten Silicide"],
+      "ecorr_range": [-0.10, 0.20],
+      "icorr_range": [0.1, 5.0],
+      "exclude_keywords": [],
+      "notes": "中性/弱酸具 WO3/SiO2 鈍化，強鹼易溶解"
+    },
+    "SAC305": {
+      "category": "packaging_solder",
+      "aliases": ["Sn-3.0Ag-0.5Cu", "Sn3Ag0.5Cu", "Sn-3Ag-0.5Cu"],
+      "ecorr_range": [-0.30, -0.15],
+      "icorr_range": [1.0, 15.0],
+      "exclude_keywords": [],
+      "notes": "電位由 Sn 基材主導，略貴於純 Sn"
+    },
+    "Sn-Ag": {
+      "category": "packaging_microbump",
+      "aliases": ["SnAg", "Sn-3.5Ag", "Sn-2.5Ag"],
+      "ecorr_range": [-0.30, -0.15],
+      "icorr_range": [1.0, 15.0],
+      "exclude_keywords": [],
+      "notes": "注意 Ag3Sn 造成的微電偶效應"
+    },
+    "Ni-P": {
+      "category": "packaging_UBM",
+      "aliases": ["Electroless Ni-P", "ENIG", "ENEPIG"],
+      "ecorr_range": [-0.15, 0.10],
+      "icorr_range": [0.2, 5.0],
+      "exclude_keywords": ["HER", "OER", "electrocatalyst"],
+      "notes": "高磷 (>10 wt% P) 呈非晶態，抗點蝕能力優於純 Ni"
+    },
+    "In": {
+      "category": "packaging_TIM_bonding",
+      "aliases": ["Indium"],
+      "ecorr_range": [-0.50, -0.30],
+      "icorr_range": [2.0, 30.0],
+      "exclude_keywords": [],
+      "notes": "活潑金屬，中性含氯液中易發生局部腐蝕"
+    },
+    "Bi": {
+      "category": "packaging_low_temp_solder",
+      "aliases": ["Bismuth"],
+      "ecorr_range": [-0.05, 0.15],
+      "icorr_range": [0.5, 10.0],
+      "exclude_keywords": ["CO2RR", "electrocatalyst"],
+      "notes": "半金屬，在中性水溶液中相對較貴"
+    },
+    "ITO": {
+      "category": "optoelectronic_TCO",
+      "aliases": ["Indium Tin Oxide", "In2O3-SnO2"],
+      "ecorr_range": [0.05, 0.35],
+      "icorr_range": [0.05, 2.0],
+      "exclude_keywords": ["solar cell", "perovskite"],
+      "notes": "酸性環境易發生電化學還原或溶解"
+    },
+    "Ge": {
+      "category": "FEOL_channel_material",
+      "aliases": ["Germanium"],
+      "ecorr_range": [-0.20, 0.10],
+      "icorr_range": [1.0, 20.0],
+      "exclude_keywords": ["Li-ion", "battery", "anode"],
+      "notes": "對溶氧與 H2O2 極度敏感，濕式清洗易與金屬耦合腐蝕"
+    }
+  }
+}

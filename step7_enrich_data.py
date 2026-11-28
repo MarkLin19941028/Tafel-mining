@@ -29,7 +29,7 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -40,6 +40,7 @@ from step5_constants import (
     NERNST_SLOPE,
     PURE_MATERIAL_CLASSES,
     convert_to_she,
+    get_ecorr_hard_bounds,
 )
 
 MP_REST_BASE = "https://api.materialsproject.org"
@@ -594,6 +595,7 @@ def run_enrich(
     refresh_cache: bool = False,
     offline: bool = False,
     include_alloys: bool = False,
+    quality_filter: Literal["pass", "pass_warn", "all"] = "pass",
     *,
     settings: config.PipelineSettings | None = None,
 ) -> pd.DataFrame:
@@ -606,6 +608,9 @@ def run_enrich(
     if not echem_path.exists():
         raise FileNotFoundError(f"找不到 {echem_path}，請先執行 Step 6 (step6_merge.py)。")
 
+    if quality_filter not in ("pass", "pass_warn", "all"):
+        raise ValueError(f"不支援的 quality_filter: {quality_filter}（可用：pass, pass_warn, all）")
+
     echem_df = pd.read_csv(echem_path)
     sol_df = pd.read_csv(sol_path) if sol_path.exists() else pd.DataFrame()
     mat_df = pd.read_csv(mat_path) if mat_path.exists() else pd.DataFrame()
@@ -613,6 +618,23 @@ def run_enrich(
     print(f"[Step 7] 載入合併資料：Echem={len(echem_df)}, Solutions={len(sol_df)}, Materials={len(mat_df)}")
 
     df = echem_df.copy()
+
+    # 品管閘門：依 Step 6b quality_flag 篩選（預設僅保留 PASS 紀錄）
+    if "quality_flag" in df.columns and quality_filter != "all":
+        before_q = len(df)
+        allowed_flags = {"PASS"} if quality_filter == "pass" else {"PASS", "WARN"}
+        df = df[df["quality_flag"].isin(allowed_flags)].reset_index(drop=True)
+        print(
+            f"[Step 7] quality_flag 過濾 ({quality_filter}): "
+            f"{before_q} -> {len(df)} 筆（排除 {before_q - len(df)} 筆）"
+        )
+
+    # 對齊校正後的 Ecorr_V_SHE_cleaned（保留原始 Ecorr_V_SHE_raw 備查），供 Pourbaix 與過電位特徵計算
+    if "Ecorr_V_SHE_cleaned" in df.columns and "Ecorr_V_SHE" in df.columns:
+        df["Ecorr_V_SHE_raw"] = df["Ecorr_V_SHE"]
+        cleaned_num = pd.to_numeric(df["Ecorr_V_SHE_cleaned"], errors="coerce")
+        raw_num = pd.to_numeric(df["Ecorr_V_SHE"], errors="coerce")
+        df["Ecorr_V_SHE"] = cleaned_num.combine_first(raw_num)
 
     # 預設只針對純金屬與目標化合物做純元素 DFT/Pourbaix 強化與電偶模擬
     if not include_alloys and "material_class" in df.columns:
@@ -674,6 +696,18 @@ def run_enrich(
             ]
             filled = sum(v is not None for v in converted)
             print(f"[Step 7] 以 pH_effective 補算 {filled} 筆 RHE 記錄的 Ecorr_V_SHE")
+
+            if quality_filter != "all":
+                ecorr_num = pd.to_numeric(df["Ecorr_V_SHE"], errors="coerce")
+                mat_ids = df["material_id"] if "material_id" in df.columns else pd.Series([None] * len(df), index=df.index)
+                bounds = mat_ids.map(get_ecorr_hard_bounds)
+                lo_bounds = pd.Series([b[0] for b in bounds], index=df.index, dtype=float)
+                hi_bounds = pd.Series([b[1] for b in bounds], index=df.index, dtype=float)
+                oob_rhe = rhe_mask & ecorr_num.notna() & ((ecorr_num < lo_bounds) | (ecorr_num > hi_bounds))
+                if oob_rhe.any():
+                    n_oob_rhe = int(oob_rhe.sum())
+                    df = df[~oob_rhe].reset_index(drop=True)
+                    print(f"[Step 7] 排除 {n_oob_rhe} 筆 RHE 補算後超出物理硬邊界之記錄")
 
     # 下游 ML/模擬缺溫度時預設回退 25°C
     if "temperature_C" in df.columns:
@@ -829,11 +863,24 @@ def main():
         action="store_true",
         help="包含 alloy / coating_composite 記錄（預設只針對 pure / compound 做純元素特徵強化）",
     )
+    q_group = parser.add_mutually_exclusive_group()
+    q_group.add_argument(
+        "--include-warn",
+        action="store_true",
+        help="除 PASS 外亦納入 quality_flag == WARN 記錄",
+    )
+    q_group.add_argument(
+        "--all-records",
+        action="store_true",
+        help="停用 quality_flag 過濾，納入所有記錄（包含 EXCLUDE）",
+    )
     args = parser.parse_args()
+    q_filter = "all" if args.all_records else ("pass_warn" if args.include_warn else "pass")
     run_enrich(
         refresh_cache=args.refresh_cache,
         offline=args.offline,
         include_alloys=args.include_alloys,
+        quality_filter=q_filter,
     )
 
 

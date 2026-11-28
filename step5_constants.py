@@ -30,6 +30,16 @@ KNOWN_MATERIALS: dict[str, dict] = build_known_materials()
 NERNST_SLOPE: float = 0.05916  # 2.303 RT / F at 298.15 K (V/pH)
 PURE_MATERIAL_CLASSES: tuple[str, ...] = ("pure", "compound")
 TABLE_EXTRACTION_METHODS: tuple[str, ...] = ("table_regex", "table_column_mapped")
+GLOBAL_ECORR_HARD_BOUNDS_V_SHE: tuple[float, float] = (-2.0, 1.5)
+MG_ECORR_HARD_BOUNDS_V_SHE: tuple[float, float] = (-2.2, 1.5)
+NEGATED_ECORR_HEADER_NOTE: str = "Ecorr negated from minus header"
+
+
+def get_ecorr_hard_bounds(material_id: str | None) -> tuple[float, float]:
+    """回傳全體材料共用的 Ecorr (V vs SHE) 物理硬邊界（僅 Mg 下限放寬至 -2.2 V）。"""
+    if str(material_id or "").strip() == "Mg":
+        return MG_ECORR_HARD_BOUNDS_V_SHE
+    return GLOBAL_ECORR_HARD_BOUNDS_V_SHE
 
 REF_ELECTRODE_TO_SHE: dict[str, float] = {
 
@@ -174,7 +184,7 @@ def parse_scientific(raw: str) -> float | None:
 
 
 _UNIT_SCALE_RE = re.compile(r"(?:[×xX*·⋅]\s*)?10\s*\^?\s*([+\-]?\s*\d+)")
-_PURE_AMP_RE = re.compile(r"(?:^|[^a-z])a(?:/|cm|mm|m|$)")
+_PURE_AMP_RE = re.compile(r"(?:^|[^a-z])a(?:/|\.?cm|\.?mm|\.?m|$)")
 
 
 def normalize_icorr_to_uA_cm2(value: float, unit: str) -> float | None:

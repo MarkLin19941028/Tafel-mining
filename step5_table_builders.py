@@ -13,6 +13,7 @@ from step5_constants import (
     PURE_MATERIAL_CLASSES,
     TABLE_EXTRACTION_METHODS,
     calc_corrosion_rate,
+    get_ecorr_hard_bounds,
 )
 from step5_text_extractor import (
     classify_solution_category,
@@ -625,14 +626,17 @@ def check_outlier_reason(
     mat = row.get("material_id") or "default"
     mat_class = row.get("material_class") or "pure"
     ecorr_she = row.get("Ecorr_V_SHE")
-    if (
-        mat_class in PURE_MATERIAL_CLASSES
-        and ecorr_she is not None
-        and not pd.isna(ecorr_she)
-    ):
-        lo, hi = ecorr_ranges.get(mat, ecorr_ranges["default"])
-        if not (lo <= float(ecorr_she) <= hi):
-            reasons.append(f"Ecorr_V_SHE={ecorr_she} out of [{lo}, {hi}] V for {mat}")
+    if ecorr_she is not None and not pd.isna(ecorr_she):
+        ecorr_f = float(ecorr_she)
+        lo_hard, hi_hard = get_ecorr_hard_bounds(mat)
+        if not (lo_hard <= ecorr_f <= hi_hard):
+            reasons.append(
+                f"Ecorr_V_SHE={ecorr_she} out of global hard bounds [{lo_hard}, {hi_hard}] V"
+            )
+        elif mat_class in PURE_MATERIAL_CLASSES:
+            lo, hi = ecorr_ranges.get(mat, ecorr_ranges["default"])
+            if not (lo <= ecorr_f <= hi):
+                reasons.append(f"Ecorr_V_SHE={ecorr_she} out of [{lo}, {hi}] V for {mat}")
 
     icorr = row.get("icorr_uA_cm2")
     if icorr is not None and not pd.isna(icorr):
