@@ -6,65 +6,33 @@ and populate three standardised CSV tables:
   3. {metal}_electrochemical_database.csv
 """
 
+from collections import Counter
+from dataclasses import replace as dataclass_replace
+import json
 import os
 
 import pandas as pd
 from tqdm import tqdm
 
-from config import (
-    KEEP_ONLY_TARGET_METAL,
-    METAL_SYMBOL,
-    STEP5_ECHEM_OUTPUT,
-    STEP5_MATERIAL_OUTPUT,
-    STEP5_OUTLIERS_OUTPUT,
-    STEP5_RAW_OUTPUT,
-    STEP5_SOLUTION_OUTPUT,
-    TEXT_DIR,
-)
-from step5_constants import (
-    KNOWN_MATERIALS,
-    REF_ELECTRODE_TO_SHE,
-    calc_corrosion_rate,
-    convert_to_she,
-    normalize_ecorr_to_v,
-    normalize_icorr_to_uA_cm2,
-    normalize_text,
-    parse_scientific,
-)
-from step5_text_extractor import (
-    assign_material,
-    classify_solution_category,
-    count_materials,
-    detect_reactions,
-    extract_electrolytes,
-    extract_from_text,
-    extract_phs,
-    extract_ref_electrodes,
-    extract_temperatures,
-    find_materials,
-    format_counts,
-    generate_solution_id,
-    get_context,
-    lookup_species_category,
-    normalise_material,
-    normalise_ref_electrode,
-    normalise_species,
-    select_environment_for_record,
-    select_ref_electrode,
-    strip_references,
-)
-from step5_table_extractor import (
-    extract_from_tables,
-    extract_table_captions,
-    parse_structured_table,
-)
+import config
+from step5_constants import normalize_text
 from step5_table_builders import (
     build_electrochemical_database,
     build_material_properties,
     build_solution_properties,
-    check_outlier_reason,
     filter_echem_outliers,
     is_eligible_echem_record,
+)
+from step5_table_extractor import (
+    extract_from_tables,
+    extract_table_captions,
+)
+from step5_text_extractor import (
+    count_materials,
+    extract_from_text,
+    extract_paper_environment,
+    extract_ref_electrodes,
+    strip_references,
 )
 
 # ====================================================================
@@ -75,11 +43,16 @@ from step5_table_builders import (
 
  
 
-def run_extract():
+def run_extract(ctx: config.MetalRunContext | None = None):
+    ctx = ctx or config.default_metal_context()
+    ctx.ensure_dirs()
+    settings = ctx.settings
+    metal_symbol = ctx.metal_symbol
+    text_dir = ctx.text_dir
 
-    text_files = [f for f in os.listdir(TEXT_DIR) if f.endswith(".txt")]
+    text_files = [f for f in os.listdir(text_dir) if f.endswith(".txt")]
 
-    print(f"Found {len(text_files)} text files in {TEXT_DIR}")
+    print(f"Found {len(text_files)} text files in {text_dir}")
 
  
 
@@ -91,7 +64,7 @@ def run_extract():
 
         source_id = txt_file.replace(".txt", "")
 
-        txt_path = os.path.join(TEXT_DIR, txt_file)
+        txt_path = os.path.join(text_dir, txt_file)
 
  
 
@@ -103,39 +76,66 @@ def run_extract():
 
         norm_text = normalize_text(text)
         body_text = strip_references(norm_text)
-        paper_counts = count_materials(body_text)
-        text_records = extract_from_text(norm_text, source_id, paper_counts=paper_counts)
+        paper_counts = count_materials(body_text, ctx=ctx)
+        paper_environment = extract_paper_environment(
+            norm_text,
+            body_text,
+            table_captions=extract_table_captions(body_text),
+        )
+        table_path = os.path.join(text_dir, source_id + "_tables.json")
+        if os.path.exists(table_path):
+            try:
+                with open(table_path, "r", encoding="utf-8") as tf:
+                    raw_tables = json.load(tf)
+                if isinstance(raw_tables, list):
+                    header_chunks: list[str] = []
+                    for tbl in raw_tables:
+                        if isinstance(tbl, list):
+                            for hrow in tbl[:3]:
+                                if isinstance(hrow, list):
+                                    header_chunks.append(" ".join(str(c or "") for c in hrow))
+                    if header_chunks:
+                        tbl_refs = extract_ref_electrodes(" ".join(header_chunks))
+                        if tbl_refs:
+                            merged_ref_counts = Counter(paper_environment.ref_counts)
+                            merged_ref_counts.update(tbl_refs)
+                            merged_refs = [
+                                r
+                                for r, _ in sorted(
+                                    merged_ref_counts.items(),
+                                    key=lambda kv: (-kv[1], kv[0]),
+                                )
+                            ]
+                            paper_environment = dataclass_replace(
+                                paper_environment,
+                                ref_counts=merged_ref_counts,
+                                refs=merged_refs,
+                            )
+            except (OSError, json.JSONDecodeError):
+                pass
+        text_records = extract_from_text(
+            norm_text,
+            source_id,
+            paper_counts=paper_counts,
+            ctx=ctx,
+            paper_environment=paper_environment,
+        )
 
-        table_path = os.path.join(TEXT_DIR, source_id + "_tables.json")
         table_records = []
 
         if os.path.exists(table_path):
-            ref_counts = extract_ref_electrodes(body_text)
-            paper_env = {
-                "electrolytes": extract_electrolytes(body_text),
-                "ph_counts": extract_phs(body_text),
-                "temp_counts": extract_temperatures(body_text),
-                "ref_counts": ref_counts,
-                "refs": [r for r, _ in sorted(ref_counts.items(), key=lambda kv: (-kv[1], kv[0]))],
-                "reactions": detect_reactions(norm_text),
-                "table_captions": extract_table_captions(body_text),
-                "metal_form": text_records[0].get("metal_form") if text_records else None,
-                "surface_preparation": text_records[0].get("surface_preparation") if text_records else None,
-                "measurement_methods": text_records[0].get("measurement_methods") if text_records else None,
-                "scan_rates_raw": text_records[0].get("scan_rates_raw") if text_records else None,
-                "immersion_times_raw": text_records[0].get("immersion_times_raw") if text_records else None,
-                "deaerated": text_records[0].get("deaerated", False) if text_records else False,
-                "aerated": text_records[0].get("aerated", False) if text_records else False,
-                "o2_saturated": text_records[0].get("o2_saturated", False) if text_records else False,
-            }
             table_records = extract_from_tables(
-                table_path, source_id, paper_counts=paper_counts, paper_env=paper_env
+                table_path,
+                source_id,
+                paper_counts=paper_counts,
+                paper_environment=paper_environment,
+                ctx=ctx,
             )
 
         # 論文級表格優先：若該論文已有至少 1 筆合格（且符合目標金屬篩選）電化學表格記錄，則捨棄內文 regex 記錄避免重複
         has_valid_table = any(
             is_eligible_echem_record(r)
-            and (not KEEP_ONLY_TARGET_METAL or r.get("is_target_metal", False))
+            and (not settings.keep_only_target_metal or r.get("is_target_metal", False))
             for r in table_records
         )
         if has_valid_table:
@@ -161,15 +161,15 @@ def run_extract():
 
     # 1. material_properties
 
-    print(f"\n--- Building {METAL_SYMBOL} material_properties ---")        # ✅
+    print(f"\n--- Building {metal_symbol} material_properties ---")        # ✅
 
-    mat_df = build_material_properties(all_raw_records)
+    mat_df = build_material_properties(all_raw_records, ctx=ctx)
 
-    mat_df.to_csv(STEP5_MATERIAL_OUTPUT, index=False, encoding="utf-8-sig")  # ✅
+    mat_df.to_csv(ctx.step5_material_output, index=False, encoding="utf-8-sig")  # ✅
 
     print(f"  Materials found: {len(mat_df)}")
 
-    print(f"  ✅ Saved to {STEP5_MATERIAL_OUTPUT}")
+    print(f"  ✅ Saved to {ctx.step5_material_output}")
 
     if not mat_df.empty:
 
@@ -179,15 +179,15 @@ def run_extract():
 
     # 2. solution_properties
 
-    print(f"\n--- Building {METAL_SYMBOL} solution_properties ---")        # ✅
+    print(f"\n--- Building {metal_symbol} solution_properties ---")        # ✅
 
-    sol_df = build_solution_properties(all_raw_records)
+    sol_df = build_solution_properties(all_raw_records, ctx=ctx)
 
-    sol_df.to_csv(STEP5_SOLUTION_OUTPUT, index=False, encoding="utf-8-sig")  # ✅
+    sol_df.to_csv(ctx.step5_solution_output, index=False, encoding="utf-8-sig")  # ✅
 
     print(f"  Unique solutions: {len(sol_df)}")
 
-    print(f"  ✅ Saved to {STEP5_SOLUTION_OUTPUT}")
+    print(f"  ✅ Saved to {ctx.step5_solution_output}")
 
     if not sol_df.empty and "solution_category" in sol_df.columns:
 
@@ -203,13 +203,13 @@ def run_extract():
 
     # 3. electrochemical_database
 
-    print(f"\n--- Building {METAL_SYMBOL} electrochemical_database ---")   # ✅
+    print(f"\n--- Building {metal_symbol} electrochemical_database ---")   # ✅
 
-    echem_df = build_electrochemical_database(all_raw_records, sol_df)
-    echem_df, outliers_df = filter_echem_outliers(echem_df)
-    outliers_df.to_csv(STEP5_OUTLIERS_OUTPUT, index=False, encoding="utf-8-sig")
+    echem_df = build_electrochemical_database(all_raw_records, sol_df, ctx=ctx)
+    echem_df, outliers_df = filter_echem_outliers(echem_df, settings=settings)
+    outliers_df.to_csv(ctx.step5_outliers_output, index=False, encoding="utf-8-sig")
     if len(outliers_df) > 0:
-        print(f"  🧹 Filtered {len(outliers_df)} outlier records → {STEP5_OUTLIERS_OUTPUT}")
+        print(f"  🧹 Filtered {len(outliers_df)} outlier records → {ctx.step5_outliers_output}")
     # 同步移除未在最終有效電化學主表中被引用的孤立溶液
     if not sol_df.empty and "solution_id" in sol_df.columns:
         valid_sids = (
@@ -218,12 +218,12 @@ def run_extract():
             else set()
         )
         sol_df = sol_df[sol_df["solution_id"].isin(valid_sids)].reset_index(drop=True)
-        sol_df.to_csv(STEP5_SOLUTION_OUTPUT, index=False, encoding="utf-8-sig")
-    echem_df.to_csv(STEP5_ECHEM_OUTPUT, index=False, encoding="utf-8-sig")  # ✅
+        sol_df.to_csv(ctx.step5_solution_output, index=False, encoding="utf-8-sig")
+    echem_df.to_csv(ctx.step5_echem_output, index=False, encoding="utf-8-sig")  # ✅
 
     print(f"  Total records: {len(echem_df)}")
 
-    print(f"  ✅ Saved to {STEP5_ECHEM_OUTPUT}")
+    print(f"  ✅ Saved to {ctx.step5_echem_output}")
 
  
 
@@ -297,9 +297,9 @@ def run_extract():
 
     raw_df = pd.DataFrame(all_raw_records)
 
-    raw_df.to_csv(STEP5_RAW_OUTPUT, index=False, encoding="utf-8-sig")     # ✅
+    raw_df.to_csv(ctx.step5_raw_output, index=False, encoding="utf-8-sig")     # ✅
 
-    print(f"\n  Raw records saved to {STEP5_RAW_OUTPUT}")
+    print(f"\n  Raw records saved to {ctx.step5_raw_output}")
 
  
 
@@ -312,5 +312,6 @@ def run_extract():
  
 
 if __name__ == "__main__":
-
-    run_extract()
+    _cli_ctx = config.default_metal_context()
+    _cli_ctx.print_summary()
+    run_extract(ctx=_cli_ctx)

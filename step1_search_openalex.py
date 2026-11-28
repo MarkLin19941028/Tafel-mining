@@ -14,25 +14,7 @@ import pandas as pd
 
 from tqdm import tqdm
 
-from config import (
-    ENABLE_EUROPEPMC_XML,
-    ENABLE_OPENALEX,
-    ENABLE_SEMANTIC_SCHOLAR,
-    EUROPEPMC_MAX_PAPERS,
-    FROM_YEAR,
-    MAILTO,
-    MAX_RECORDS_PER_QUERY,
-    OPENALEX_API_KEY,
-    REQUEST_TIMEOUT,
-    REQUIRE_TARGET_IN_TITLE_ABSTRACT,
-    SEARCH_QUERIES,
-    STEP1_CURSOR_STATE_PATH,
-    STEP1_EARLY_STOP_EMPTY_PAGES,
-    STEP1_INFLIGHT_DEDUP,
-    STEP1_MAX_SCAN_MULTIPLIER,
-    STEP1_OUTPUT,
-    build_target_regex,
-)
+import config
 from record_keys import (
     is_title_abstract_relevant,
     make_record_key,
@@ -73,13 +55,14 @@ def invert_abstract(inv_index: dict) -> str:
     return " ".join(w for _, w in word_positions)
 
 
-def request_with_retry(url, params, max_retries=5):
+def request_with_retry(url, params, max_retries=5, *, timeout: int | None = None):
+    effective_timeout = timeout if timeout is not None else config.load_settings().request_timeout
 
     for attempt in range(max_retries):
 
         try:
 
-            resp = _SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)  # ✅ 複用連線池
+            resp = _SESSION.get(url, params=params, timeout=effective_timeout)  # ✅ 複用連線池
 
             if resp.status_code == 429:
 
@@ -239,12 +222,25 @@ def fetch_single_query(
     target_pat=None,
     start_cursor: str = "*",
     cursor_out: dict | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict]:
     if max_records <= 0:
         return []
 
-    scan_mult = max(1, int(STEP1_MAX_SCAN_MULTIPLIER if max_scan_multiplier is None else max_scan_multiplier))
-    early_stop = max(0, int(STEP1_EARLY_STOP_EMPTY_PAGES if early_stop_empty_pages is None else early_stop_empty_pages))
+    settings = ctx.settings if ctx is not None else config.load_settings()
+    scan_mult = max(
+        1,
+        int(settings.step1_max_scan_multiplier if max_scan_multiplier is None else max_scan_multiplier),
+    )
+    early_stop = max(
+        0,
+        int(
+            settings.step1_early_stop_empty_pages
+            if early_stop_empty_pages is None
+            else early_stop_empty_pages
+        ),
+    )
     inflight = known_keys is not None
 
     # OpenAlex 官方支援 per-page 最高 200；即時去重模式下一次抓 200 筆可將翻頁與延遲減半
@@ -268,10 +264,10 @@ def fetch_single_query(
         while new_count < max_records:
             params = {
                 "search": search_query,
-                "filter": f"from_publication_date:{FROM_YEAR}-01-01,type:article",
+                "filter": f"from_publication_date:{settings.from_year}-01-01,type:article",
                 "per-page": per_page,
                 "cursor": cursor,
-                "mailto": MAILTO,
+                "mailto": settings.mailto,
                 "select": (
                     "id,doi,title,publication_year,primary_location,"
                     "best_oa_location,open_access,"
@@ -279,11 +275,11 @@ def fetch_single_query(
                 ),
             }
 
-            if OPENALEX_API_KEY:
-                params["api_key"] = OPENALEX_API_KEY
+            if settings.openalex_api_key:
+                params["api_key"] = settings.openalex_api_key
 
             try:
-                resp = request_with_retry(BASE_URL, params)
+                resp = request_with_retry(BASE_URL, params, timeout=settings.request_timeout)
             except OpenAlexInvalidCursorError:
                 if cursor != "*" and pages_scanned == 0:
                     print("  ⚠️  OpenAlex 既有游標已失效，自動重設為從頭掃描 (*)")
@@ -521,60 +517,55 @@ def _merge_with_existing_step1(existing_df: pd.DataFrame, new_df: pd.DataFrame) 
     return merged
 
 
-def _mark_batch_oa_quota_exhausted() -> None:
-    """若由 run_all 批次模式啟動，寫入配額耗盡標記檔，讓後續金屬自動跳過 OpenAlex。"""
-    marker_path = os.environ.get("TAFEL_OA_QUOTA_MARKER", "").strip()
-    if not marker_path:
-        return
-    try:
-        with open(marker_path, "w", encoding="utf-8") as f:
-            f.write("exhausted\n")
-    except OSError:
-        pass
-
-
-def run_search(append: bool | None = None, skip_openalex: bool | None = None):
-    if append is None:
-        append = os.environ.get("TAFEL_APPEND") == "1"
-    if skip_openalex is None:
-        skip_openalex = os.environ.get("TAFEL_SKIP_OPENALEX") == "1"
+def run_search(
+    append: bool = False,
+    skip_openalex: bool = False,
+    *,
+    ctx: config.MetalRunContext | None = None,
+    oa_quota_state: dict[str, bool] | None = None,
+):
+    ctx = ctx or config.default_metal_context()
+    ctx.ensure_dirs()
+    settings = ctx.settings
 
     existing_df: pd.DataFrame | None = None
-    known_keys: set[str] | None = set() if STEP1_INFLIGHT_DEDUP else None
-    needs_backfill: dict[str, set[str]] | None = {} if STEP1_INFLIGHT_DEDUP else None
-    cursor_store = Step1CursorStore(STEP1_CURSOR_STATE_PATH)
+    known_keys: set[str] | None = set() if settings.step1_inflight_dedup else None
+    needs_backfill: dict[str, set[str]] | None = {} if settings.step1_inflight_dedup else None
+    cursor_store = Step1CursorStore(ctx.step1_cursor_state_path)
 
-    if append and os.path.exists(STEP1_OUTPUT):
+    if append and os.path.exists(ctx.step1_output):
         try:
-            existing_df, ex_keys, ex_backfill = _load_existing_step1_index(STEP1_OUTPUT)
-            if STEP1_INFLIGHT_DEDUP and known_keys is not None and needs_backfill is not None:
+            existing_df, ex_keys, ex_backfill = _load_existing_step1_index(ctx.step1_output)
+            if settings.step1_inflight_dedup and known_keys is not None and needs_backfill is not None:
                 known_keys.update(ex_keys)
                 needs_backfill.update(ex_backfill)
                 print(
                     f"[Step 1 In-Flight Dedup] 已載入既有索引：{len(ex_keys)} 篇論文"
                     f"（待回補缺漏欄位：{len(ex_backfill)} 篇；"
-                    f"護欄：max_scan={STEP1_MAX_SCAN_MULTIPLIER}x, early_stop={STEP1_EARLY_STOP_EMPTY_PAGES} 空頁）"
+                    f"護欄：max_scan={settings.step1_max_scan_multiplier}x, "
+                    f"early_stop={settings.step1_early_stop_empty_pages} 空頁）"
                 )
         except Exception as e:
             print(f"  ⚠️ 無法讀取既有 Step 1 檔案建立索引 ({e})，改以一般搜尋執行。")
             existing_df = None
-    elif STEP1_INFLIGHT_DEDUP:
+    elif settings.step1_inflight_dedup:
         print(
             f"[Step 1 In-Flight Dedup] 啟用本次跨查詢／跨來源即時去重"
-            f"（護欄：max_scan={STEP1_MAX_SCAN_MULTIPLIER}x, early_stop={STEP1_EARLY_STOP_EMPTY_PAGES} 空頁）"
+            f"（護欄：max_scan={settings.step1_max_scan_multiplier}x, "
+            f"early_stop={settings.step1_early_stop_empty_pages} 空頁）"
         )
 
-    target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
+    target_pat = ctx.target_regex if settings.require_target_in_title_abstract else None
     all_records = []
     interrupted_err: BaseException | None = None
-    oa_enabled = ENABLE_OPENALEX and (not skip_openalex)
+    oa_enabled = ctx.enable_openalex and (not skip_openalex)
 
     if oa_enabled:
         skipped_exhausted = 0
         resumed_queries = 0
         try:
-            for q in SEARCH_QUERIES:
-                q_key = make_cursor_key("openalex", q, FROM_YEAR)
+            for q in ctx.search_queries:
+                q_key = make_cursor_key("openalex", q, settings.from_year)
                 start_cursor = "*"
                 if append:
                     saved_cursor, is_exhausted = cursor_store.get(q_key)
@@ -591,12 +582,13 @@ def run_search(append: bool | None = None, skip_openalex: bool | None = None):
                 try:
                     recs = fetch_single_query(
                         q,
-                        MAX_RECORDS_PER_QUERY,
+                        settings.max_records_per_query,
                         known_keys=known_keys,
                         needs_backfill=needs_backfill,
                         target_pat=target_pat,
                         start_cursor=start_cursor,
                         cursor_out=cursor_box,
+                        ctx=ctx,
                     )
                     all_records.extend(recs)
                 finally:
@@ -607,7 +599,8 @@ def run_search(append: bool | None = None, skip_openalex: bool | None = None):
                             bool(cursor_box.get("exhausted", False)),
                         )
         except OpenAlexQuotaExhaustedError as e:
-            _mark_batch_oa_quota_exhausted()
+            if oa_quota_state is not None:
+                oa_quota_state["exhausted"] = True
             print(
                 f"\n⚠️  [Step 1] {e}\n"
                 f"   已安全保存目前 OpenAlex 取得之 {len(all_records)} 筆記錄與游標進度，"
@@ -637,23 +630,24 @@ def run_search(append: bool | None = None, skip_openalex: bool | None = None):
     epmc_df = pd.DataFrame()
 
     if interrupted_err is None:
-        if ENABLE_SEMANTIC_SCHOLAR:
+        if settings.enable_semantic_scholar:
             from semantic_scholar_fetcher import search_semantic_scholar
 
             s2_recs = search_semantic_scholar(
-                SEARCH_QUERIES,
+                list(ctx.search_queries),
                 known_keys=known_keys,
                 needs_backfill=needs_backfill,
                 append=append,
+                ctx=ctx,
             )
             if s2_recs:
                 s2_df = pd.DataFrame(s2_recs).dropna(subset=["doi"])
 
-        if ENABLE_EUROPEPMC_XML and EUROPEPMC_MAX_PAPERS > 0:
+        if settings.enable_europepmc_xml and settings.europepmc_max_papers > 0:
             from europepmc_fetcher import build_europepmc_query, search_europepmc_metadata
 
-            epmc_query = build_europepmc_query()
-            epmc_key = make_cursor_key("europepmc", epmc_query, FROM_YEAR)
+            epmc_query = build_europepmc_query(ctx=ctx)
+            epmc_key = make_cursor_key("europepmc", epmc_query, settings.from_year)
             epmc_start = "*"
             epmc_exhausted = False
             if append:
@@ -670,6 +664,7 @@ def run_search(append: bool | None = None, skip_openalex: bool | None = None):
                     needs_backfill=needs_backfill,
                     start_cursor=epmc_start,
                     cursor_out=epmc_cursor_box,
+                    ctx=ctx,
                 )
                 if epmc_cursor_box:
                     cursor_store.update(
@@ -682,23 +677,28 @@ def run_search(append: bool | None = None, skip_openalex: bool | None = None):
 
     df = _merge_sources(oa_df, s2_df, epmc_df)
 
-    if (append or interrupted_err is not None) and os.path.exists(STEP1_OUTPUT):
+    if (append or interrupted_err is not None) and os.path.exists(ctx.step1_output):
         try:
             if existing_df is None:
-                existing_df = pd.read_csv(STEP1_OUTPUT)
+                existing_df = pd.read_csv(ctx.step1_output)
             df = _merge_with_existing_step1(existing_df, df)
         except Exception as e:
             print(f"  ⚠️ 無法讀取既有 Step 1 檔案進行合併 ({e})，改以本次結果輸出。")
 
     if not df.empty:
-        save_csv_atomic(df, STEP1_OUTPUT)
-        print(f"✅ Saved to {STEP1_OUTPUT} ({len(df)} papers)")
+        save_csv_atomic(df, ctx.step1_output)
+        print(f"✅ Saved to {ctx.step1_output} ({len(df)} papers)")
 
     if interrupted_err is not None:
         raise interrupted_err
 
     return df
 
-if __name__ == "__main__":
 
-    run_search()
+if __name__ == "__main__":
+    _cli_ctx = config.default_metal_context()
+    _cli_ctx.print_summary()
+    run_search(
+        append=(os.environ.get("TAFEL_APPEND") == "1"),
+        ctx=_cli_ctx,
+    )

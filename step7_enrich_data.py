@@ -35,21 +35,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-try:
-    from config import (
-        ENABLE_MP_API,
-        MP_API_KEY,
-        MP_CACHE_PATH,
-        REQUEST_TIMEOUT,
-        SIMULATOR_DATA_DIR,
-    )
-except ImportError:
-    SIMULATOR_DATA_DIR = str(Path(__file__).parent / "data" / "merged")
-    ENABLE_MP_API = True
-    MP_API_KEY = os.environ.get("MP_API_KEY") or ""
-    MP_CACHE_PATH = os.path.join(SIMULATOR_DATA_DIR, "mp_cache.json")
-    REQUEST_TIMEOUT = 30
-
+import config
 from step5_constants import (
     NERNST_SLOPE,
     PURE_MATERIAL_CLASSES,
@@ -195,7 +181,14 @@ def _save_mp_cache(cache_path: Path, cache: dict[str, Any]) -> None:
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _mp_rest_get(endpoint: str, params: dict[str, Any], api_key: str) -> list[dict]:
+def _mp_rest_get(
+    endpoint: str,
+    params: dict[str, Any],
+    api_key: str,
+    *,
+    timeout: int | None = None,
+) -> list[dict]:
+    req_timeout = timeout if timeout is not None else config.load_settings().request_timeout
     url = f"{MP_REST_BASE}{endpoint}"
     headers = {
         "X-API-KEY": api_key,
@@ -203,7 +196,7 @@ def _mp_rest_get(endpoint: str, params: dict[str, Any], api_key: str) -> list[di
         "User-Agent": "TafelMiningStep7/1.0",
     }
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, params=params, headers=headers, timeout=req_timeout)
         if resp.status_code != 200:
             return []
         payload = resp.json()
@@ -219,6 +212,8 @@ def fetch_mp_properties_for_material(
     api_key: str,
     cache: dict[str, Any],
     refresh: bool = False,
+    *,
+    timeout: int | None = None,
 ) -> dict[str, Any]:
     """
     從 Materials Project 取得：
@@ -260,6 +255,7 @@ def fetch_mp_properties_for_material(
             "_limit": 10,
         },
         api_key,
+        timeout=timeout,
     )
     if summary_docs:
         summary_docs.sort(key=lambda d: d.get("energy_above_hull", 999.0))
@@ -281,6 +277,7 @@ def fetch_mp_properties_for_material(
                 "_limit": 5,
             },
             api_key,
+            timeout=timeout,
         )
         if elem_docs:
             elem_docs.sort(key=lambda d: d.get("energy_above_hull", 999.0))
@@ -295,6 +292,7 @@ def fetch_mp_properties_for_material(
                 "_limit": 5,
             },
             api_key,
+            timeout=timeout,
         )
         if surf_docs:
             sdoc = surf_docs[0]
@@ -317,6 +315,7 @@ def fetch_mp_properties_for_material(
                 "_limit": 10,
             },
             api_key,
+            timeout=timeout,
         )
         if ox_docs:
             ox_docs.sort(key=lambda d: d.get("energy_above_hull", 999.0))
@@ -595,8 +594,11 @@ def run_enrich(
     refresh_cache: bool = False,
     offline: bool = False,
     include_alloys: bool = False,
+    *,
+    settings: config.PipelineSettings | None = None,
 ) -> pd.DataFrame:
-    merged_dir = Path(SIMULATOR_DATA_DIR)
+    resolved_settings = settings or config.load_settings()
+    merged_dir = Path(resolved_settings.simulator_data_dir)
     echem_path = merged_dir / "electrochemical_database.csv"
     sol_path = merged_dir / "solution_properties.csv"
     mat_path = merged_dir / "material_properties.csv"
@@ -678,8 +680,9 @@ def run_enrich(
         df["temperature_C"] = pd.to_numeric(df["temperature_C"], errors="coerce").fillna(25.0)
 
     # 4. 查詢 Materials Project API（使用快取避免重複請求）
-    use_mp = ENABLE_MP_API and (not offline) and bool(MP_API_KEY)
-    cache_path = Path(MP_CACHE_PATH)
+    mp_api_key = resolved_settings.mp_api_key
+    use_mp = resolved_settings.enable_mp_api and (not offline) and bool(mp_api_key)
+    cache_path = Path(resolved_settings.mp_cache_path)
     mp_cache = _load_mp_cache(cache_path)
 
     unique_pairs: set[tuple[str, str]] = set()
@@ -697,11 +700,16 @@ def run_enrich(
         print(f"[Step 7] 串接 Materials Project API（共 {len(unique_pairs)} 種唯一材料，快取：{cache_path.name}）")
         for query_key, be in sorted(unique_pairs):
             info = fetch_mp_properties_for_material(
-                query_key, be, MP_API_KEY, mp_cache, refresh=refresh_cache
+                query_key,
+                be,
+                mp_api_key,
+                mp_cache,
+                refresh=refresh_cache,
+                timeout=resolved_settings.request_timeout,
             )
             mp_lookup[query_key] = info
             if be not in pbx_diagrams:
-                pbx_diagrams[be] = _try_build_pymatgen_pourbaix(be, MP_API_KEY)
+                pbx_diagrams[be] = _try_build_pymatgen_pourbaix(be, mp_api_key)
         _save_mp_cache(cache_path, mp_cache)
     else:
         print("[Step 7] 離線模式或未設定 MP_API_KEY：使用快取資料（若有）與內建熱力學表")

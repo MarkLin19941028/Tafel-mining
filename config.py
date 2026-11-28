@@ -1,18 +1,91 @@
 """
 ====================================================================
-  Tafel Mining Project — 內部設定載入與衍生引擎 (config.py)
-  ⚠️ 日常調整參數請編輯 `user_settings.py`（API 金鑰請設於 `.env`）
+  Tafel Mining Project — 執行情境與衍生設定引擎 (config.py)
+  日常調整參數請編輯 `user_settings.py`（API 金鑰請設於 `.env`）
+  匯入本模組不應產生建立資料夾、載入 .env 或印出橫幅等副作用。
 ====================================================================
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass, fields
 import json as _json
 import os
-import re as _re
 from pathlib import Path as _Path
+import re as _re
+from typing import Any, Mapping, Sequence
 
 import user_settings as _us
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+METALS_DB_PATH = _Path(PROJECT_ROOT) / "metals_db.json"
+
+VALID_SEARCH_MODES: tuple[str, ...] = (
+    "corrosion",
+    "cmp_etch",
+    "inhibitor",
+    "solvent",
+    "catalysis",
+)
+
+_OPENALEX_COMPOUND_BATCH_SIZE: int = 6
+_OPENALEX_CUSTOM_QUERY_BATCH_SIZE: int = 3
+
+# 在不分大小寫的外部搜尋引擎中容易與英文常見字混淆的元素／化合物符號（如 TiN vs tin）
+_AMBIGUOUS_SYMBOL_CONTEXT: dict[str, tuple[str, ...]] = {
+    "TiN": ("nitride", "coating", "thin film", "barrier", "PVD", "CVD", "ALD", "CMP", "sputtering"),
+}
+_QUERY_TOKEN_RE = _re.compile(r'"[^"]+"|\S+')
+
+
+def build_metal_search_clause(
+    target_metal: str,
+    metal_symbol: str,
+    *,
+    syntax: str = "boolean",
+) -> str:
+    """
+    建立目標金屬的布林搜尋子句：
+    - syntax='boolean'：OpenAlex / Europe PMC 語法（AND / OR）
+    - syntax='s2'：Semantic Scholar /search/bulk 語法（+ / |）
+    對於易與英文單字混淆的符號（如 TiN vs tin），強制搭配材料領域限定詞。
+    """
+    and_op, or_op = (" + ", " | ") if syntax == "s2" else (" AND ", " OR ")
+    if target_metal.lower() == metal_symbol.lower():
+        return f'"{target_metal}"'
+
+    ctx_terms = _AMBIGUOUS_SYMBOL_CONTEXT.get(metal_symbol)
+    if ctx_terms:
+        ctx_or = or_op.join(f'"{t}"' for t in ctx_terms)
+        return f'("{target_metal}"{or_op}("{metal_symbol}"{and_op}({ctx_or})))'
+    return f'("{target_metal}"{or_op}"{metal_symbol}")'
+
+
+def _to_openalex_and_clause(raw_query: str) -> str:
+    """將空白分隔的展開查詢（如 '"ruthenium" "CMP" "Tafel"'）轉為 OpenAlex 明確 AND 語法。"""
+    tokens = _QUERY_TOKEN_RE.findall(raw_query.strip())
+    if not tokens:
+        return ""
+    normalized: list[str] = []
+    for tok in tokens:
+        upper = tok.upper()
+        if upper in ("AND", "OR", "NOT"):
+            continue
+        if tok.startswith('"') and tok.endswith('"'):
+            normalized.append(tok)
+        else:
+            normalized.append(f'"{tok}"')
+    return " AND ".join(normalized)
+
+
+def _filter_compounds_for_search(
+    compounds: Sequence[str],
+    target_metal: str,
+    metal_symbol: str,
+) -> list[str]:
+    """移除與 target_metal 或 metal_symbol 完全重複的裸詞（避免 TiN 等易混淆符號繞過限定詞）。"""
+    skip = {target_metal.lower(), metal_symbol.lower()}
+    return [c for c in compounds if c and c.strip().lower() not in skip]
 
 
 def _load_dotenv(env_path: _Path) -> None:
@@ -33,77 +106,7 @@ def _load_dotenv(env_path: _Path) -> None:
                 os.environ.setdefault(key, value)
 
 
-_load_dotenv(_Path(PROJECT_ROOT) / ".env")
-
-# ============================================================
-#  1. 匯入使用者設定與環境變數 API 金鑰
-# ============================================================
-
-MAILTO = _us.MAILTO
-SKIP_EXISTING_STEP1 = _us.SKIP_EXISTING_STEP1
-SKIP_EXISTING_STEP2 = _us.SKIP_EXISTING_STEP2
-STEP1_INFLIGHT_DEDUP = _us.STEP1_INFLIGHT_DEDUP
-STEP1_MAX_SCAN_MULTIPLIER = _us.STEP1_MAX_SCAN_MULTIPLIER
-STEP1_EARLY_STOP_EMPTY_PAGES = _us.STEP1_EARLY_STOP_EMPTY_PAGES
-MAX_RECORDS_PER_QUERY = _us.MAX_RECORDS_PER_QUERY
-STEP2_SKIP_UNPAYWALL_IF_HAS_PDF = getattr(_us, "STEP2_SKIP_UNPAYWALL_IF_HAS_PDF", True)
-STEP2_UNPAYWALL_DELAY = getattr(_us, "STEP2_UNPAYWALL_DELAY", 0.2)
-STEP2_CHECKPOINT_EVERY = getattr(_us, "STEP2_CHECKPOINT_EVERY", 200)
-DOWNLOAD_DELAY = _us.DOWNLOAD_DELAY
-STEP3_MAX_WORKERS = getattr(_us, "STEP3_MAX_WORKERS", 4)
-STEP3_DOMAIN_403_THRESHOLD = getattr(_us, "STEP3_DOMAIN_403_THRESHOLD", 15)
-STEP3_MAX_PDF_MB = getattr(_us, "STEP3_MAX_PDF_MB", 50)
-REQUEST_TIMEOUT = _us.REQUEST_TIMEOUT
-FROM_YEAR = _us.FROM_YEAR
-
-ENABLE_OPENALEX = (
-    getattr(_us, "ENABLE_OPENALEX", True)
-    and os.environ.get("TAFEL_SKIP_OPENALEX") != "1"
-)
-OPENALEX_USE_GROUPED_QUERIES = getattr(_us, "OPENALEX_USE_GROUPED_QUERIES", True)
-
-ENABLE_SEMANTIC_SCHOLAR = _us.ENABLE_SEMANTIC_SCHOLAR
-SEMANTIC_SCHOLAR_USE_BULK = _us.SEMANTIC_SCHOLAR_USE_BULK
-SEMANTIC_SCHOLAR_MAX_PER_QUERY = _us.SEMANTIC_SCHOLAR_MAX_PER_QUERY
-SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY = _us.SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY
-SEMANTIC_SCHOLAR_DELAY = _us.SEMANTIC_SCHOLAR_DELAY
-
-ENABLE_EUROPEPMC_XML = _us.ENABLE_EUROPEPMC_XML
-EUROPEPMC_MAX_PAPERS = _us.EUROPEPMC_MAX_PAPERS
-EUROPEPMC_DELAY = _us.EUROPEPMC_DELAY
-
-ENABLE_MP_API = _us.ENABLE_MP_API
-
-METALS_TO_RUN: list[str] = list(_us.METALS_TO_RUN)
-DEFAULT_METAL: str = _us.DEFAULT_METAL
-
-TAFEL_MIN = _us.TAFEL_MIN
-TAFEL_MAX = _us.TAFEL_MAX
-CONTEXT_WINDOW = _us.CONTEXT_WINDOW
-FILTER_OUTLIERS = _us.FILTER_OUTLIERS
-ICORR_VALID_RANGE_UA_CM2: tuple[float, float] = tuple(_us.ICORR_VALID_RANGE_UA_CM2)
-KEEP_ONLY_TARGET_METAL = _us.KEEP_ONLY_TARGET_METAL
-REQUIRE_TARGET_IN_TITLE_ABSTRACT = _us.REQUIRE_TARGET_IN_TITLE_ABSTRACT
-MIN_MATERIAL_MENTIONS = _us.MIN_MATERIAL_MENTIONS
-
-OPENALEX_API_KEY = os.environ.get("OPENALEX_API_KEY", "")
-SEMANTIC_SCHOLAR_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
-MP_API_KEY = os.environ.get("MP_API_KEY", "")
-
-# ============================================================
-#  2. 模組化搜尋模式解析（支援單選、多選清單、空白/逗號字串與 all）
-# ============================================================
-
-VALID_SEARCH_MODES: tuple[str, ...] = (
-    "corrosion",
-    "cmp_etch",
-    "inhibitor",
-    "solvent",
-    "catalysis",
-)
-
-
-def parse_search_modes(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
+def parse_search_modes(raw: str | Sequence[str] | None) -> list[str]:
     """
     將搜尋模式設定或命令列參數正規化為去重後的原子模式清單。
     合法原子模式：corrosion, cmp_etch, inhibitor, solvent, catalysis（另支援 'all' 展開全部 5 種）。
@@ -138,19 +141,6 @@ def parse_search_modes(raw: str | list[str] | tuple[str, ...] | None) -> list[st
         valid_str = ", ".join(VALID_SEARCH_MODES)
         raise ValueError(f"至少需指定一種搜尋模式（可用選項：{valid_str}）")
     return deduped
-
-
-_ENV_SEARCH_MODES = os.environ.get("TAFEL_SEARCH_MODES") or os.environ.get("TAFEL_SEARCH_MODE")
-SEARCH_MODES: list[str] = parse_search_modes(
-    _ENV_SEARCH_MODES if _ENV_SEARCH_MODES else _us.SEARCH_MODES
-)
-SEARCH_MODE: str = "+".join(SEARCH_MODES)
-
-# ============================================================
-#  3. 載入金屬資料庫 (metals_db.json)
-# ============================================================
-
-METALS_DB_PATH = _Path(PROJECT_ROOT) / "metals_db.json"
 
 
 def _load_metals_db(
@@ -196,174 +186,160 @@ def resolve_metal_symbol(raw: str) -> str:
     return key
 
 
-METAL_SYMBOL = resolve_metal_symbol(os.environ.get("TAFEL_METAL", DEFAULT_METAL))
-_ACTIVE_PRESET = METAL_PRESETS[METAL_SYMBOL]
-TARGET_METAL = _ACTIVE_PRESET["target_metal"]
-COMPOUNDS = list(_ACTIVE_PRESET["compounds"])
-CMP_QUERIES = list(_ACTIVE_PRESET.get("cmp_queries", []))
-INHIBITOR_QUERIES = list(_ACTIVE_PRESET.get("inhibitor_queries", []))
-
-# ============================================================
-#  4. 依選取搜尋模式自動生成關鍵字清單
-# ============================================================
-
-_CORROSION_QUERIES = [
-    # --- 金屬腐蝕 / 極化曲線核心 ---
-    f'"{TARGET_METAL}" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "corrosion current density"',
-    f'"{TARGET_METAL}" "Tafel extrapolation" corrosion',
-    f'"{TARGET_METAL}" "Tafel plot" corrosion',
-    f'"{TARGET_METAL}" "Tafel slope" corrosion',
-    f'"{TARGET_METAL}" "electrochemical corrosion"',
-    f'"{TARGET_METAL}" "polarization curve" corrosion',
-    f'"{TARGET_METAL}" "polarization resistance" corrosion',
-    f'"{TARGET_METAL}" "anodic polarization" corrosion',
-    f'"{TARGET_METAL}" "cathodic polarization" corrosion',
-    f'"{TARGET_METAL}" "Ecorr" "icorr"',
-    f'"{METAL_SYMBOL}" "potentiodynamic polarization" corrosion',
-    f'"{METAL_SYMBOL}" "corrosion current density" "Tafel"',
-
-    # --- 化合物 / 合金腐蝕（自動展開）---
-    *[f'"{comp}" "potentiodynamic polarization"' for comp in COMPOUNDS],
-    *[f'"{comp}" "corrosion current density"' for comp in COMPOUNDS],
-]
-
-_CMP_ETCH_QUERIES = [
-    # --- 半導體 CMP / 濕蝕刻 / 氧化劑環境通用查詢 ---
-    f'"{TARGET_METAL}" "chemical mechanical" "potentiodynamic"',
-    f'"{TARGET_METAL}" "CMP" "Tafel"',
-    f'"{TARGET_METAL}" "CMP" "corrosion current"',
-    f'"{TARGET_METAL}" "slurry" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "wet etching" "potentiodynamic"',
-    f'"{TARGET_METAL}" "H2O2" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "hydrogen peroxide" "Tafel" corrosion',
-    f'"{TARGET_METAL}" "galvanic corrosion" "CMP"',
-    f'"{METAL_SYMBOL}" "CMP" "potentiodynamic polarization"',
-    f'"{METAL_SYMBOL}" "wet etching" "Tafel" corrosion',
-    # --- 該金屬專屬 CMP / 濕蝕刻 / 氧化劑查詢 ---
-    *CMP_QUERIES,
-]
-
-_INHIBITOR_QUERIES = [
-    # --- 通用緩蝕劑 × 定量極化核心 ---
-    f'"{TARGET_METAL}" "corrosion inhibitor" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "corrosion inhibition" "Tafel"',
-    f'"{TARGET_METAL}" "inhibition efficiency" "corrosion current"',
-    f'"{TARGET_METAL}" "inhibition efficiency" "Ecorr" "icorr"',
-    f'"{TARGET_METAL}" "organic inhibitor" "potentiodynamic"',
-    f'"{TARGET_METAL}" "mixed-type inhibitor" "Tafel"',
-    f'"{METAL_SYMBOL}" "corrosion inhibitor" "potentiodynamic"',
-    f'"{METAL_SYMBOL}" "inhibition efficiency" "Tafel"',
-
-    # --- 跨化學家族代表詞（確保搜集不同種類的 inhibitor）---
-    f'"{TARGET_METAL}" "triazole" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "imidazole" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "tetrazole" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "thiazole" "corrosion" "Tafel"',
-    f'"{TARGET_METAL}" "Schiff base" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "amino acid" "corrosion inhibitor" "polarization"',
-    f'"{TARGET_METAL}" "cysteine" "corrosion" "potentiodynamic"',
-    f'"{TARGET_METAL}" "thiourea" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "surfactant" "corrosion inhibitor" "Tafel"',
-    f'"{TARGET_METAL}" "ionic liquid" "corrosion inhibitor" "polarization"',
-    f'"{TARGET_METAL}" "CMP" "corrosion inhibitor" "potentiodynamic"',
-    f'"{TARGET_METAL}" "slurry" "inhibitor" "potentiodynamic"',
-
-    # --- 該金屬專屬緩蝕劑查詢（來自 metals_db.json）---
-    *INHIBITOR_QUERIES,
-]
-
-_SOLVENT_QUERIES = [
-    # --- 非水 / 有機 / 半水 / 混合溶劑核心 ---
-    f'"{TARGET_METAL}" "non-aqueous" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "nonaqueous" "corrosion" "Tafel"',
-    f'"{TARGET_METAL}" "organic solvent" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "organic media" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "anhydrous" "corrosion" "potentiodynamic"',
-    f'"{TARGET_METAL}" "semi-aqueous" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "mixed solvent" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "water-organic" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "trace water" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "protic solvent" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "aprotic solvent" "corrosion" "polarization"',
-    f'"{METAL_SYMBOL}" "non-aqueous" "potentiodynamic polarization"',
-    f'"{METAL_SYMBOL}" "organic solvent" "corrosion" "Tafel"',
-
-    # --- 常見極性質子 / 非質子有機溶劑、共溶劑與共晶溶劑 ---
-    f'"{TARGET_METAL}" "aqueous-organic" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "co-solvent" "corrosion" "potentiodynamic"',
-    f'"{TARGET_METAL}" "methanol" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "ethanol" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "ethylene glycol" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "DMSO" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "DMF" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "acetonitrile" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "NMP" "corrosion" "polarization"',
-    f'"{TARGET_METAL}" "deep eutectic solvent" "potentiodynamic polarization"',
-    f'"{TARGET_METAL}" "ionic liquid" "potentiodynamic polarization" corrosion',
-]
-
-_CATALYSIS_QUERIES = [
-    f'"{TARGET_METAL}" "Tafel slope"',
-    f'"{TARGET_METAL}" "Tafel plot"',
-    f'"{TARGET_METAL}" "polarization curve"',
-    f'"{TARGET_METAL}" "exchange current density"',
-    f'"{TARGET_METAL}" "linear sweep voltammetry" "Tafel"',
-    f'"{TARGET_METAL}" "cyclic voltammetry" corrosion',
-    f'"{TARGET_METAL}" "hydrogen evolution" "Tafel"',
-    f'"{TARGET_METAL}" "oxygen evolution" "Tafel"',
-    f'"{TARGET_METAL}" "oxygen reduction" "Tafel"',
-    f'"{TARGET_METAL}" "CO2 reduction" "Tafel"',
-    f'"{METAL_SYMBOL}" "Tafel slope" electrochemistry',
-    f'"{METAL_SYMBOL}" "Tafel slope" electrocatalyst',
-    f'"{METAL_SYMBOL}" "Tafel slope" catalyst',
-    *[f'"{comp}" "Tafel slope"' for comp in COMPOUNDS],
-    *[f'"{comp}" "Tafel"' for comp in COMPOUNDS],
-]
-
-_MODE_QUERY_MAP: dict[str, list[str]] = {
-    "corrosion": _CORROSION_QUERIES,
-    "cmp_etch": _CMP_ETCH_QUERIES,
-    "inhibitor": _INHIBITOR_QUERIES,
-    "solvent": _SOLVENT_QUERIES,
-    "catalysis": _CATALYSIS_QUERIES,
-}
+def _chunk_list(items: Sequence[str], size: int) -> list[list[str]]:
+    item_list = list(items)
+    return [item_list[i : i + size] for i in range(0, len(item_list), size)]
 
 
-_OPENALEX_COMPOUND_BATCH_SIZE: int = 8
-_OPENALEX_CUSTOM_QUERY_BATCH_SIZE: int = 4
-
-
-def _chunk_list(items: list[str], size: int) -> list[list[str]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
+def build_expanded_openalex_queries(
+    modes: str | Sequence[str],
+    *,
+    target_metal: str,
+    metal_symbol: str,
+    compounds: Sequence[str] = (),
+    cmp_queries: Sequence[str] = (),
+    inhibitor_queries: Sequence[str] = (),
+) -> list[str]:
+    """依選取的搜尋模式展開完整 OpenAlex 關鍵字查詢清單（並去重）。"""
+    active_modes = parse_search_modes(modes)
+    mode_map: dict[str, list[str]] = {
+        "corrosion": [
+            f'"{target_metal}" "potentiodynamic polarization"',
+            f'"{target_metal}" "corrosion current density"',
+            f'"{target_metal}" "Tafel extrapolation" corrosion',
+            f'"{target_metal}" "Tafel plot" corrosion',
+            f'"{target_metal}" "Tafel slope" corrosion',
+            f'"{target_metal}" "electrochemical corrosion"',
+            f'"{target_metal}" "polarization curve" corrosion',
+            f'"{target_metal}" "polarization resistance" corrosion',
+            f'"{target_metal}" "anodic polarization" corrosion',
+            f'"{target_metal}" "cathodic polarization" corrosion',
+            f'"{target_metal}" "Ecorr" "icorr"',
+            f'"{metal_symbol}" "potentiodynamic polarization" corrosion',
+            f'"{metal_symbol}" "corrosion current density" "Tafel"',
+            *[f'"{comp}" "potentiodynamic polarization"' for comp in compounds],
+            *[f'"{comp}" "corrosion current density"' for comp in compounds],
+        ],
+        "cmp_etch": [
+            f'"{target_metal}" "chemical mechanical" "potentiodynamic"',
+            f'"{target_metal}" "CMP" "Tafel"',
+            f'"{target_metal}" "CMP" "corrosion current"',
+            f'"{target_metal}" "slurry" "potentiodynamic polarization"',
+            f'"{target_metal}" "wet etching" "potentiodynamic"',
+            f'"{target_metal}" "H2O2" "potentiodynamic polarization"',
+            f'"{target_metal}" "hydrogen peroxide" "Tafel" corrosion',
+            f'"{target_metal}" "galvanic corrosion" "CMP"',
+            f'"{metal_symbol}" "CMP" "potentiodynamic polarization"',
+            f'"{metal_symbol}" "wet etching" "Tafel" corrosion',
+            *cmp_queries,
+        ],
+        "inhibitor": [
+            f'"{target_metal}" "corrosion inhibitor" "potentiodynamic polarization"',
+            f'"{target_metal}" "corrosion inhibition" "Tafel"',
+            f'"{target_metal}" "inhibition efficiency" "corrosion current"',
+            f'"{target_metal}" "inhibition efficiency" "Ecorr" "icorr"',
+            f'"{target_metal}" "organic inhibitor" "potentiodynamic"',
+            f'"{target_metal}" "mixed-type inhibitor" "Tafel"',
+            f'"{metal_symbol}" "corrosion inhibitor" "potentiodynamic"',
+            f'"{metal_symbol}" "inhibition efficiency" "Tafel"',
+            f'"{target_metal}" "triazole" "potentiodynamic polarization"',
+            f'"{target_metal}" "imidazole" "potentiodynamic polarization"',
+            f'"{target_metal}" "tetrazole" "corrosion" "polarization"',
+            f'"{target_metal}" "thiazole" "corrosion" "Tafel"',
+            f'"{target_metal}" "Schiff base" "potentiodynamic polarization"',
+            f'"{target_metal}" "amino acid" "corrosion inhibitor" "polarization"',
+            f'"{target_metal}" "cysteine" "corrosion" "potentiodynamic"',
+            f'"{target_metal}" "thiourea" "corrosion" "polarization"',
+            f'"{target_metal}" "surfactant" "corrosion inhibitor" "Tafel"',
+            f'"{target_metal}" "ionic liquid" "corrosion inhibitor" "polarization"',
+            f'"{target_metal}" "CMP" "corrosion inhibitor" "potentiodynamic"',
+            f'"{target_metal}" "slurry" "inhibitor" "potentiodynamic"',
+            *inhibitor_queries,
+        ],
+        "solvent": [
+            f'"{target_metal}" "non-aqueous" "potentiodynamic polarization"',
+            f'"{target_metal}" "nonaqueous" "corrosion" "Tafel"',
+            f'"{target_metal}" "organic solvent" "potentiodynamic polarization"',
+            f'"{target_metal}" "organic media" "corrosion" "polarization"',
+            f'"{target_metal}" "anhydrous" "corrosion" "potentiodynamic"',
+            f'"{target_metal}" "semi-aqueous" "corrosion" "polarization"',
+            f'"{target_metal}" "mixed solvent" "potentiodynamic polarization"',
+            f'"{target_metal}" "water-organic" "corrosion" "polarization"',
+            f'"{target_metal}" "trace water" "corrosion" "polarization"',
+            f'"{target_metal}" "protic solvent" "corrosion" "polarization"',
+            f'"{target_metal}" "aprotic solvent" "corrosion" "polarization"',
+            f'"{metal_symbol}" "non-aqueous" "potentiodynamic polarization"',
+            f'"{metal_symbol}" "organic solvent" "corrosion" "Tafel"',
+            f'"{target_metal}" "aqueous-organic" "corrosion" "polarization"',
+            f'"{target_metal}" "co-solvent" "corrosion" "potentiodynamic"',
+            f'"{target_metal}" "methanol" "potentiodynamic polarization"',
+            f'"{target_metal}" "ethanol" "potentiodynamic polarization"',
+            f'"{target_metal}" "ethylene glycol" "potentiodynamic polarization"',
+            f'"{target_metal}" "DMSO" "corrosion" "polarization"',
+            f'"{target_metal}" "DMF" "corrosion" "polarization"',
+            f'"{target_metal}" "acetonitrile" "corrosion" "polarization"',
+            f'"{target_metal}" "NMP" "corrosion" "polarization"',
+            f'"{target_metal}" "deep eutectic solvent" "potentiodynamic polarization"',
+            f'"{target_metal}" "ionic liquid" "potentiodynamic polarization" corrosion',
+        ],
+        "catalysis": [
+            f'"{target_metal}" "Tafel slope"',
+            f'"{target_metal}" "Tafel plot"',
+            f'"{target_metal}" "polarization curve"',
+            f'"{target_metal}" "exchange current density"',
+            f'"{target_metal}" "linear sweep voltammetry" "Tafel"',
+            f'"{target_metal}" "cyclic voltammetry" corrosion',
+            f'"{target_metal}" "hydrogen evolution" "Tafel"',
+            f'"{target_metal}" "oxygen evolution" "Tafel"',
+            f'"{target_metal}" "oxygen reduction" "Tafel"',
+            f'"{target_metal}" "CO2 reduction" "Tafel"',
+            f'"{metal_symbol}" "Tafel slope" electrochemistry',
+            f'"{metal_symbol}" "Tafel slope" electrocatalyst',
+            f'"{metal_symbol}" "Tafel slope" catalyst',
+            *[f'"{comp}" "Tafel slope"' for comp in compounds],
+            *[f'"{comp}" "Tafel"' for comp in compounds],
+        ],
+    }
+    return list(dict.fromkeys(q for m in active_modes for q in mode_map[m]))
 
 
 def build_grouped_openalex_queries(
-    modes: list[str] | tuple[str, ...] | str | None = None,
+    modes: str | Sequence[str],
+    *,
+    target_metal: str,
+    metal_symbol: str,
+    compounds: Sequence[str] = (),
+    cmp_queries: Sequence[str] = (),
+    inhibitor_queries: Sequence[str] = (),
 ) -> list[str]:
     """
     依選取的搜尋模式組裝高密度 OpenAlex 布林查詢（AND / OR），
-    將原本每金屬 ~110-126 組展開查詢濃縮為 ~10-15 組，大幅節省每日配額。
+    將原本每金屬 ~110-126 組展開查詢濃縮為 ~12-18 組，大幅節省每日配額，
+    並確保：
+    - 通用極化/Tafel 詞強制搭配 "corrosion"（避免 Ru/Mo 被大量 HER/OER 電催化論文稀釋）
+    - 易混淆符號（如 TiN vs tin）加上領域限定詞
+    - cmp_queries / inhibitor_queries 轉為明確 AND 語法（避免 OpenAlex 解析為 0 筆）
     """
-    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
-    metal_clause = (
-        f'("{TARGET_METAL}" OR "{METAL_SYMBOL}")'
-        if TARGET_METAL.lower() != METAL_SYMBOL.lower()
-        else f'"{TARGET_METAL}"'
-    )
+    active_modes = parse_search_modes(modes)
+    metal_clause = build_metal_search_clause(target_metal, metal_symbol, syntax="boolean")
+    filtered_compounds = _filter_compounds_for_search(compounds, target_metal, metal_symbol)
     queries: list[str] = []
 
     if "corrosion" in active_modes:
         queries.append(
             f'{metal_clause} AND ("potentiodynamic polarization" OR "corrosion current density" '
-            f'OR "Tafel extrapolation" OR "Tafel plot" OR "Tafel slope" '
-            f'OR "electrochemical corrosion" OR "polarization curve" OR "polarization resistance" '
-            f'OR "anodic polarization" OR "cathodic polarization" OR ("Ecorr" AND "icorr"))'
+            f'OR "electrochemical corrosion" OR ("Ecorr" AND "icorr"))'
         )
-        for batch in _chunk_list(COMPOUNDS, _OPENALEX_COMPOUND_BATCH_SIZE):
+        queries.append(
+            f'{metal_clause} AND "corrosion" AND ("Tafel extrapolation" OR "Tafel plot" '
+            f'OR "Tafel slope" OR "polarization curve" OR "polarization resistance" '
+            f'OR "anodic polarization" OR "cathodic polarization")'
+        )
+        for batch in _chunk_list(filtered_compounds, _OPENALEX_COMPOUND_BATCH_SIZE):
             comp_or = " OR ".join(f'"{c}"' for c in batch)
             queries.append(
-                f'({comp_or}) AND ("potentiodynamic polarization" OR "corrosion current density")'
+                f'({comp_or}) AND ("potentiodynamic polarization" OR "corrosion current density" '
+                f'OR "electrochemical corrosion")'
             )
 
     if "cmp_etch" in active_modes:
@@ -372,7 +348,8 @@ def build_grouped_openalex_queries(
             f'OR "H2O2" OR "hydrogen peroxide" OR "galvanic corrosion") '
             f'AND ("potentiodynamic" OR "potentiodynamic polarization" OR "Tafel" OR "corrosion current")'
         )
-        for batch in _chunk_list(CMP_QUERIES, _OPENALEX_CUSTOM_QUERY_BATCH_SIZE):
+        and_cmp = [c for c in (_to_openalex_and_clause(q) for q in cmp_queries) if c]
+        for batch in _chunk_list(and_cmp, _OPENALEX_CUSTOM_QUERY_BATCH_SIZE):
             queries.append(" OR ".join(f"({q})" for q in batch))
 
     if "inhibitor" in active_modes:
@@ -388,7 +365,8 @@ def build_grouped_openalex_queries(
             f'OR "surfactant" OR "ionic liquid") '
             f'AND ("corrosion" OR "corrosion inhibitor") AND ("potentiodynamic" OR "polarization" OR "Tafel")'
         )
-        for batch in _chunk_list(INHIBITOR_QUERIES, _OPENALEX_CUSTOM_QUERY_BATCH_SIZE):
+        and_inh = [c for c in (_to_openalex_and_clause(q) for q in inhibitor_queries) if c]
+        for batch in _chunk_list(and_inh, _OPENALEX_CUSTOM_QUERY_BATCH_SIZE):
             queries.append(" OR ".join(f"({q})" for q in batch))
 
     if "solvent" in active_modes:
@@ -411,7 +389,7 @@ def build_grouped_openalex_queries(
             f'AND ("hydrogen evolution" OR "oxygen evolution" OR "oxygen reduction" '
             f'OR "CO2 reduction" OR "electrocatalyst" OR "catalyst")'
         )
-        for batch in _chunk_list(COMPOUNDS, _OPENALEX_COMPOUND_BATCH_SIZE):
+        for batch in _chunk_list(filtered_compounds, _OPENALEX_COMPOUND_BATCH_SIZE):
             comp_or = " OR ".join(f'"{c}"' for c in batch)
             queries.append(f'({comp_or}) AND ("Tafel slope" OR "Tafel")')
 
@@ -419,126 +397,37 @@ def build_grouped_openalex_queries(
 
 
 def build_search_queries(
-    modes: list[str] | tuple[str, ...] | str | None = None,
+    modes: str | Sequence[str],
     *,
-    grouped: bool | None = None,
+    target_metal: str,
+    metal_symbol: str,
+    compounds: Sequence[str] = (),
+    cmp_queries: Sequence[str] = (),
+    inhibitor_queries: Sequence[str] = (),
+    grouped: bool = True,
 ) -> list[str]:
-    """依指定的搜尋模式清單組裝並去重 OpenAlex 查詢清單。"""
-    use_grouped = OPENALEX_USE_GROUPED_QUERIES if grouped is None else grouped
-    if use_grouped:
-        return build_grouped_openalex_queries(modes)
-    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
-    return list(dict.fromkeys(
-        q for m in active_modes for q in _MODE_QUERY_MAP[m]
-    ))
-
-
-SEARCH_QUERIES: list[str] = build_search_queries(SEARCH_MODES)
-
-# ============================================================
-#  5. 資料夾與輸出檔案路徑（根據金屬自動歸類）
-# ============================================================
-
-if _us.SIMULATOR_DATA_DIR:
-    _custom_sim = os.path.expanduser(str(_us.SIMULATOR_DATA_DIR).strip())
-    SIMULATOR_DATA_DIR = (
-        _custom_sim
-        if os.path.isabs(_custom_sim)
-        else os.path.abspath(os.path.join(PROJECT_ROOT, _custom_sim))
+    """依指定的搜尋模式清單與金屬參數組裝並去重 OpenAlex 查詢清單。"""
+    builder = build_grouped_openalex_queries if grouped else build_expanded_openalex_queries
+    return builder(
+        modes,
+        target_metal=target_metal,
+        metal_symbol=metal_symbol,
+        compounds=compounds,
+        cmp_queries=cmp_queries,
+        inhibitor_queries=inhibitor_queries,
     )
-else:
-    SIMULATOR_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "merged")
-
-os.makedirs(SIMULATOR_DATA_DIR, exist_ok=True)
-MP_CACHE_PATH = os.path.join(SIMULATOR_DATA_DIR, "mp_cache.json")
-
-DATA_DIR = os.path.join(PROJECT_ROOT, "data", METAL_SYMBOL)
-METADATA_DIR = os.path.join(DATA_DIR, "metadata")
-PDF_DIR = os.path.join(DATA_DIR, "pdfs")
-TEXT_DIR = os.path.join(DATA_DIR, "texts")
-EXTRACTED_DIR = os.path.join(DATA_DIR, "extracted")
-
-# 若不是純讀取設定的靜默模式，自動建立當前金屬所需資料夾
-if os.environ.get("TAFEL_QUIET_CONFIG") != "1":
-    for _d in [METADATA_DIR, PDF_DIR, TEXT_DIR, EXTRACTED_DIR]:
-        os.makedirs(_d, exist_ok=True)
-
-STEP1_OUTPUT = os.path.join(
-    METADATA_DIR,
-    f"{METAL_SYMBOL.lower()}_tafel_metadata.csv",
-)
-S2_CACHE_PATH = os.path.join(
-    METADATA_DIR,
-    f"{METAL_SYMBOL.lower()}_s2_cache.json",
-)
-STEP1_CURSOR_STATE_PATH = os.path.join(
-    METADATA_DIR,
-    f"{METAL_SYMBOL.lower()}_step1_cursor_state.json",
-)
-STEP2_OUTPUT = os.path.join(
-    METADATA_DIR,
-    f"{METAL_SYMBOL.lower()}_tafel_with_pdf.csv",
-)
-DOWNLOAD_STATE_PATH = os.path.join(
-    METADATA_DIR,
-    f"{METAL_SYMBOL.lower()}_download_state.json",
-)
-STEP5_OUTPUT = os.path.join(
-    METADATA_DIR,
-    f"{METAL_SYMBOL.lower()}_echem_extracted.csv",
-)
-STEP5_MATERIAL_OUTPUT = os.path.join(
-    EXTRACTED_DIR,
-    f"{METAL_SYMBOL.lower()}_material_properties.csv",
-)
-STEP5_SOLUTION_OUTPUT = os.path.join(
-    EXTRACTED_DIR,
-    f"{METAL_SYMBOL.lower()}_solution_properties.csv",
-)
-STEP5_ECHEM_OUTPUT = os.path.join(
-    EXTRACTED_DIR,
-    f"{METAL_SYMBOL.lower()}_electrochemical_database.csv",
-)
-STEP5_RAW_OUTPUT = os.path.join(
-    EXTRACTED_DIR,
-    f"{METAL_SYMBOL.lower()}_raw_records.csv",
-)
-STEP5_OUTLIERS_OUTPUT = os.path.join(
-    EXTRACTED_DIR,
-    f"{METAL_SYMBOL.lower()}_filtered_outliers.csv",
-)
-
-# ============================================================
-#  6. 材料 regex pattern 產生器
-# ============================================================
-
-MATERIAL_PATTERNS = [
-    *COMPOUNDS,
-    f"{TARGET_METAL} oxide",
-    f"{TARGET_METAL} hydroxide",
-    f"{TARGET_METAL} foam",
-    f"{TARGET_METAL} foil",
-    f"{TARGET_METAL} electrode",
-    f"{TARGET_METAL} nanowire",
-    f"{TARGET_METAL} nanoparticle",
-    f"{TARGET_METAL} thin film",
-    f"{METAL_SYMBOL} electrode",
-    f"{METAL_SYMBOL} foam",
-    f"{METAL_SYMBOL} foil",
-    f"{METAL_SYMBOL}-based",
-]
 
 
-def build_target_regex(target_metal=None, symbol=None, compounds=None):
+def build_target_regex(
+    target_metal: str,
+    symbol: str,
+    compounds: Sequence[str] = (),
+) -> _re.Pattern:
     """
     建立「目標金屬」的 regex（Step 3 篩選與 Step 5 共用）。
     - 英文全名 / 多字詞化合物：不分大小寫 + 單字邊界
     - 元素符號 / 化學式：區分大小寫，前面不可接字母、後面不可接小寫字母
     """
-    target_metal = target_metal or TARGET_METAL
-    symbol = symbol or METAL_SYMBOL
-    compounds = COMPOUNDS if compounds is None else compounds
-
     parts = [
         r"(?i:\b" + _re.escape(target_metal) + r"\b)",
         r"(?<![A-Za-z])" + _re.escape(symbol) + r"(?![a-z])",
@@ -551,49 +440,349 @@ def build_target_regex(target_metal=None, symbol=None, compounds=None):
     return _re.compile("|".join(parts))
 
 
-# ============================================================
-#  7. 印出目前設定（執行任何步驟時自動顯示）
-# ============================================================
+@dataclass(frozen=True)
+class PipelineSettings:
+    """跨金屬共用預設、資料源開關、物理驗證門檻與合併輸出目錄。"""
+
+    project_root: _Path
+    data_root: _Path
+    simulator_data_dir: _Path
+    mp_cache_path: _Path
+    mailto: str
+    skip_existing_step1: bool
+    skip_existing_step2: bool
+    step1_inflight_dedup: bool
+    step1_max_scan_multiplier: int
+    step1_early_stop_empty_pages: int
+    max_records_per_query: int
+    step2_skip_unpaywall_if_has_pdf: bool
+    step2_unpaywall_delay: float
+    step2_checkpoint_every: int
+    download_delay: float
+    step3_max_workers: int
+    step3_domain_403_threshold: int
+    step3_max_pdf_mb: int
+    request_timeout: int
+    from_year: int
+    default_search_modes: tuple[str, ...]
+    enable_openalex: bool
+    openalex_use_grouped_queries: bool
+    enable_semantic_scholar: bool
+    semantic_scholar_use_bulk: bool
+    semantic_scholar_max_per_query: int
+    semantic_scholar_max_queries_no_key: int
+    semantic_scholar_delay: float
+    enable_europepmc_xml: bool
+    europepmc_max_papers: int
+    europepmc_delay: float
+    enable_mp_api: bool
+    metals_to_run: tuple[str, ...]
+    default_metal: str
+    tafel_min: float
+    tafel_max: float
+    context_window: int
+    filter_outliers: bool
+    icorr_valid_range_ua_cm2: tuple[float, float]
+    keep_only_target_metal: bool
+    require_target_in_title_abstract: bool
+    min_material_mentions: int
+    openalex_api_key: str
+    semantic_scholar_api_key: str
+    mp_api_key: str
+    metal_presets: dict[str, dict]
+    ecorr_valid_range_v_she: dict[str, tuple[float, float]]
+
+    def ensure_merged_dir(self) -> None:
+        os.makedirs(self.simulator_data_dir, exist_ok=True)
 
 
-def print_config():
-    print("=" * 58)
-    print(f"  Target Metal : {TARGET_METAL} ({METAL_SYMBOL})")
-    print(
-        f"  Search Modes : {', '.join(SEARCH_MODES)}  |  "
-        f"Europe PMC: {'ON (' + str(EUROPEPMC_MAX_PAPERS) + ')' if ENABLE_EUROPEPMC_XML else 'OFF'}"
-    )
-    s2_status = (
-        "ON (API Key)"
-        if (ENABLE_SEMANTIC_SCHOLAR and SEMANTIC_SCHOLAR_API_KEY)
-        else ("ON (Public)" if ENABLE_SEMANTIC_SCHOLAR else "OFF")
-    )
-    mp_status = (
-        "ON (API Key)"
-        if (ENABLE_MP_API and MP_API_KEY)
-        else ("ON (Offline)" if ENABLE_MP_API else "OFF")
-    )
-    oa_mode = "Grouped" if OPENALEX_USE_GROUPED_QUERIES else "Expanded"
-    oa_status = (
-        f"ON ({oa_mode}, {'API Key' if OPENALEX_API_KEY else 'Public'})"
-        if ENABLE_OPENALEX
-        else "OFF"
-    )
-    print(f"  OpenAlex     : {oa_status}")
-    print(f"  S2 / MP API  : Semantic Scholar {s2_status}  |  Materials Project {mp_status}")
-    print(
-        f"  Compounds    : {len(COMPOUNDS)} types  |  "
-        f"CMP Qs: {len(CMP_QUERIES)}  |  Inhibitor Qs: {len(INHIBITOR_QUERIES)}"
-    )
-    print(f"  Queries      : {len(SEARCH_QUERIES)} combinations")
-    print(f"  Max/query    : {MAX_RECORDS_PER_QUERY} records")
-    print(f"  From year    : {FROM_YEAR}")
-    print(f"  Data folder  : {DATA_DIR}")
-    print(f"  Step1 output : {STEP1_OUTPUT}")
-    print(f"  Step2 output : {STEP2_OUTPUT}")
-    print(f"  Step5 output : {STEP5_ECHEM_OUTPUT}")
-    print("=" * 58)
+@dataclass(frozen=True)
+class MetalRunContext:
+    """單一金屬在指定搜尋模式下的不可變執行情境與產物路徑。"""
+
+    settings: PipelineSettings
+    metal_symbol: str
+    target_metal: str
+    compounds: tuple[str, ...]
+    cmp_queries: tuple[str, ...]
+    inhibitor_queries: tuple[str, ...]
+    search_modes: tuple[str, ...]
+    search_queries: tuple[str, ...]
+    enable_openalex: bool
+    target_regex: _re.Pattern
+    data_dir: str
+    metadata_dir: str
+    pdf_dir: str
+    text_dir: str
+    extracted_dir: str
+    step1_output: str
+    s2_cache_path: str
+    step1_cursor_state_path: str
+    step2_output: str
+    download_state_path: str
+    step5_output: str
+    step5_material_output: str
+    step5_solution_output: str
+    step5_echem_output: str
+    step5_raw_output: str
+    step5_outliers_output: str
+
+    def ensure_dirs(self) -> None:
+        for d in (self.metadata_dir, self.pdf_dir, self.text_dir, self.extracted_dir):
+            os.makedirs(d, exist_ok=True)
+
+    def format_summary(self) -> str:
+        s = self.settings
+        s2_status = (
+            "ON (API Key)"
+            if (s.enable_semantic_scholar and s.semantic_scholar_api_key)
+            else ("ON (Public)" if s.enable_semantic_scholar else "OFF")
+        )
+        mp_status = (
+            "ON (API Key)"
+            if (s.enable_mp_api and s.mp_api_key)
+            else ("ON (Offline)" if s.enable_mp_api else "OFF")
+        )
+        oa_mode = "Grouped" if s.openalex_use_grouped_queries else "Expanded"
+        oa_status = (
+            f"ON ({oa_mode}, {'API Key' if s.openalex_api_key else 'Public'})"
+            if self.enable_openalex
+            else "OFF"
+        )
+        lines = [
+            "=" * 58,
+            f"  Target Metal : {self.target_metal} ({self.metal_symbol})",
+            (
+                f"  Search Modes : {', '.join(self.search_modes)}  |  "
+                f"Europe PMC: {'ON (' + str(s.europepmc_max_papers) + ')' if s.enable_europepmc_xml else 'OFF'}"
+            ),
+            f"  OpenAlex     : {oa_status}",
+            f"  S2 / MP API  : Semantic Scholar {s2_status}  |  Materials Project {mp_status}",
+            (
+                f"  Compounds    : {len(self.compounds)} types  |  "
+                f"CMP Qs: {len(self.cmp_queries)}  |  Inhibitor Qs: {len(self.inhibitor_queries)}"
+            ),
+            f"  Queries      : {len(self.search_queries)} combinations",
+            f"  Max/query    : {s.max_records_per_query} records",
+            f"  From year    : {s.from_year}",
+            f"  Data folder  : {self.data_dir}",
+            f"  Step1 output : {self.step1_output}",
+            f"  Step2 output : {self.step2_output}",
+            f"  Step5 output : {self.step5_echem_output}",
+            "=" * 58,
+        ]
+        return "\n".join(lines)
+
+    def print_summary(self) -> None:
+        print(self.format_summary())
 
 
-if os.environ.get("TAFEL_QUIET_CONFIG") != "1":
-    print_config()
+_SETTINGS_FIELD_NAMES = frozenset(f.name for f in fields(PipelineSettings))
+
+
+def _resolve_simulator_dir(
+    project_root: _Path,
+    data_root: _Path,
+    explicit_sim_dir: str | _Path | None,
+    has_explicit_data_root: bool,
+) -> _Path:
+    if explicit_sim_dir is not None:
+        raw = str(explicit_sim_dir).strip()
+        expanded = _Path(os.path.expanduser(raw))
+        return expanded if expanded.is_absolute() else (project_root / expanded).resolve()
+    if has_explicit_data_root:
+        return data_root / "merged"
+    if _us.SIMULATOR_DATA_DIR:
+        raw = str(_us.SIMULATOR_DATA_DIR).strip()
+        expanded = _Path(os.path.expanduser(raw))
+        return expanded if expanded.is_absolute() else (project_root / expanded).resolve()
+    return data_root / "merged"
+
+
+def load_settings(
+    *,
+    data_root: str | _Path | None = None,
+    simulator_data_dir: str | _Path | None = None,
+    env: Mapping[str, str] | None = None,
+    **overrides: Any,
+) -> PipelineSettings:
+    """從 user_settings.py 與環境變數建立不可變 PipelineSettings（無磁碟或列印副作用）。"""
+    unknown = set(overrides) - _SETTINGS_FIELD_NAMES
+    if unknown:
+        raise TypeError(f"Unknown PipelineSettings override(s): {', '.join(sorted(unknown))}")
+
+    project_root = _Path(overrides.pop("project_root", PROJECT_ROOT)).resolve()
+    if env is None:
+        _load_dotenv(project_root / ".env")
+        env_map: Mapping[str, str] = os.environ
+    else:
+        env_map = env
+
+    has_explicit_data_root = data_root is not None
+    resolved_data_root = (
+        _Path(data_root).resolve() if data_root is not None else (project_root / "data")
+    )
+    resolved_sim_dir = _resolve_simulator_dir(
+        project_root,
+        resolved_data_root,
+        simulator_data_dir,
+        has_explicit_data_root=has_explicit_data_root,
+    )
+    resolved_mp_cache = _Path(overrides.pop("mp_cache_path", resolved_sim_dir / "mp_cache.json"))
+
+    raw_modes = overrides.pop("default_search_modes", _us.SEARCH_MODES)
+    default_search_modes = tuple(parse_search_modes(raw_modes))
+
+    raw_metals = overrides.pop("metals_to_run", _us.METALS_TO_RUN)
+    metals_to_run = tuple(raw_metals)
+
+    raw_icorr = overrides.pop("icorr_valid_range_ua_cm2", _us.ICORR_VALID_RANGE_UA_CM2)
+    icorr_range = (float(raw_icorr[0]), float(raw_icorr[1]))
+
+    values: dict[str, Any] = {
+        "project_root": project_root,
+        "data_root": resolved_data_root,
+        "simulator_data_dir": resolved_sim_dir,
+        "mp_cache_path": resolved_mp_cache,
+        "mailto": _us.MAILTO,
+        "skip_existing_step1": _us.SKIP_EXISTING_STEP1,
+        "skip_existing_step2": _us.SKIP_EXISTING_STEP2,
+        "step1_inflight_dedup": _us.STEP1_INFLIGHT_DEDUP,
+        "step1_max_scan_multiplier": _us.STEP1_MAX_SCAN_MULTIPLIER,
+        "step1_early_stop_empty_pages": _us.STEP1_EARLY_STOP_EMPTY_PAGES,
+        "max_records_per_query": _us.MAX_RECORDS_PER_QUERY,
+        "step2_skip_unpaywall_if_has_pdf": getattr(_us, "STEP2_SKIP_UNPAYWALL_IF_HAS_PDF", True),
+        "step2_unpaywall_delay": getattr(_us, "STEP2_UNPAYWALL_DELAY", 0.2),
+        "step2_checkpoint_every": getattr(_us, "STEP2_CHECKPOINT_EVERY", 200),
+        "download_delay": _us.DOWNLOAD_DELAY,
+        "step3_max_workers": getattr(_us, "STEP3_MAX_WORKERS", 4),
+        "step3_domain_403_threshold": getattr(_us, "STEP3_DOMAIN_403_THRESHOLD", 15),
+        "step3_max_pdf_mb": getattr(_us, "STEP3_MAX_PDF_MB", 50),
+        "request_timeout": _us.REQUEST_TIMEOUT,
+        "from_year": _us.FROM_YEAR,
+        "default_search_modes": default_search_modes,
+        "enable_openalex": getattr(_us, "ENABLE_OPENALEX", True),
+        "openalex_use_grouped_queries": getattr(_us, "OPENALEX_USE_GROUPED_QUERIES", True),
+        "enable_semantic_scholar": _us.ENABLE_SEMANTIC_SCHOLAR,
+        "semantic_scholar_use_bulk": _us.SEMANTIC_SCHOLAR_USE_BULK,
+        "semantic_scholar_max_per_query": _us.SEMANTIC_SCHOLAR_MAX_PER_QUERY,
+        "semantic_scholar_max_queries_no_key": _us.SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY,
+        "semantic_scholar_delay": _us.SEMANTIC_SCHOLAR_DELAY,
+        "enable_europepmc_xml": _us.ENABLE_EUROPEPMC_XML,
+        "europepmc_max_papers": _us.EUROPEPMC_MAX_PAPERS,
+        "europepmc_delay": _us.EUROPEPMC_DELAY,
+        "enable_mp_api": _us.ENABLE_MP_API,
+        "metals_to_run": metals_to_run,
+        "default_metal": _us.DEFAULT_METAL,
+        "tafel_min": _us.TAFEL_MIN,
+        "tafel_max": _us.TAFEL_MAX,
+        "context_window": _us.CONTEXT_WINDOW,
+        "filter_outliers": _us.FILTER_OUTLIERS,
+        "icorr_valid_range_ua_cm2": icorr_range,
+        "keep_only_target_metal": _us.KEEP_ONLY_TARGET_METAL,
+        "require_target_in_title_abstract": _us.REQUIRE_TARGET_IN_TITLE_ABSTRACT,
+        "min_material_mentions": _us.MIN_MATERIAL_MENTIONS,
+        "openalex_api_key": env_map.get("OPENALEX_API_KEY", ""),
+        "semantic_scholar_api_key": env_map.get("SEMANTIC_SCHOLAR_API_KEY", ""),
+        "mp_api_key": env_map.get("MP_API_KEY", ""),
+        "metal_presets": METAL_PRESETS,
+        "ecorr_valid_range_v_she": ECORR_VALID_RANGE_V_SHE,
+    }
+    values.update(overrides)
+    return PipelineSettings(**values)
+
+
+def build_metal_context(
+    metal: str | None = None,
+    *,
+    search_modes: str | Sequence[str] | None = None,
+    settings: PipelineSettings | None = None,
+    search_queries: Sequence[str] | None = None,
+    skip_openalex: bool = False,
+    grouped_queries: bool | None = None,
+) -> MetalRunContext:
+    """建立單一金屬的執行情境（純記憶體計算，不建立資料夾也不印出訊息）。"""
+    resolved_settings = settings or load_settings()
+    metal_symbol = resolve_metal_symbol(metal or resolved_settings.default_metal)
+    preset = resolved_settings.metal_presets[metal_symbol]
+
+    target_metal = preset["target_metal"]
+    compounds = tuple(preset["compounds"])
+    cmp_queries = tuple(preset.get("cmp_queries", ()))
+    inhibitor_queries = tuple(preset.get("inhibitor_queries", ()))
+
+    modes = tuple(
+        resolved_settings.default_search_modes
+        if search_modes is None
+        else parse_search_modes(search_modes)
+    )
+    use_grouped = (
+        resolved_settings.openalex_use_grouped_queries
+        if grouped_queries is None
+        else grouped_queries
+    )
+    if search_queries is not None:
+        queries = tuple(search_queries)
+    else:
+        queries = tuple(
+            build_search_queries(
+                modes,
+                target_metal=target_metal,
+                metal_symbol=metal_symbol,
+                compounds=compounds,
+                cmp_queries=cmp_queries,
+                inhibitor_queries=inhibitor_queries,
+                grouped=use_grouped,
+            )
+        )
+
+    data_dir = str(resolved_settings.data_root / metal_symbol)
+    metadata_dir = os.path.join(data_dir, "metadata")
+    pdf_dir = os.path.join(data_dir, "pdfs")
+    text_dir = os.path.join(data_dir, "texts")
+    extracted_dir = os.path.join(data_dir, "extracted")
+    prefix = metal_symbol.lower()
+
+    return MetalRunContext(
+        settings=resolved_settings,
+        metal_symbol=metal_symbol,
+        target_metal=target_metal,
+        compounds=compounds,
+        cmp_queries=cmp_queries,
+        inhibitor_queries=inhibitor_queries,
+        search_modes=modes,
+        search_queries=queries,
+        enable_openalex=resolved_settings.enable_openalex and (not skip_openalex),
+        target_regex=build_target_regex(target_metal, metal_symbol, compounds),
+        data_dir=data_dir,
+        metadata_dir=metadata_dir,
+        pdf_dir=pdf_dir,
+        text_dir=text_dir,
+        extracted_dir=extracted_dir,
+        step1_output=os.path.join(metadata_dir, f"{prefix}_tafel_metadata.csv"),
+        s2_cache_path=os.path.join(metadata_dir, f"{prefix}_s2_cache.json"),
+        step1_cursor_state_path=os.path.join(metadata_dir, f"{prefix}_step1_cursor_state.json"),
+        step2_output=os.path.join(metadata_dir, f"{prefix}_tafel_with_pdf.csv"),
+        download_state_path=os.path.join(metadata_dir, f"{prefix}_download_state.json"),
+        step5_output=os.path.join(metadata_dir, f"{prefix}_echem_extracted.csv"),
+        step5_material_output=os.path.join(extracted_dir, f"{prefix}_material_properties.csv"),
+        step5_solution_output=os.path.join(extracted_dir, f"{prefix}_solution_properties.csv"),
+        step5_echem_output=os.path.join(extracted_dir, f"{prefix}_electrochemical_database.csv"),
+        step5_raw_output=os.path.join(extracted_dir, f"{prefix}_raw_records.csv"),
+        step5_outliers_output=os.path.join(extracted_dir, f"{prefix}_filtered_outliers.csv"),
+    )
+
+
+def default_metal_context(*, env: Mapping[str, str] | None = None) -> MetalRunContext:
+    """供獨立執行 step1~step5 腳本時，依執行期環境變數建立預設 MetalRunContext。"""
+    settings = load_settings(env=env)
+    env_map = os.environ if env is None else env
+    raw_metal = env_map.get("TAFEL_METAL") or settings.default_metal
+    raw_modes = env_map.get("TAFEL_SEARCH_MODES") or env_map.get("TAFEL_SEARCH_MODE")
+    skip_oa = env_map.get("TAFEL_SKIP_OPENALEX") == "1"
+    return build_metal_context(
+        raw_metal,
+        search_modes=raw_modes if raw_modes else None,
+        settings=settings,
+        skip_openalex=skip_oa,
+    )

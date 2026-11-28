@@ -21,23 +21,7 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-from config import (
-    DOWNLOAD_DELAY,
-    DOWNLOAD_STATE_PATH,
-    ENABLE_EUROPEPMC_XML,
-    EUROPEPMC_DELAY,
-    EUROPEPMC_MAX_PAPERS,
-    METAL_SYMBOL,
-    PDF_DIR,
-    REQUEST_TIMEOUT,
-    REQUIRE_TARGET_IN_TITLE_ABSTRACT,
-    STEP2_OUTPUT,
-    STEP3_DOMAIN_403_THRESHOLD,
-    STEP3_MAX_PDF_MB,
-    STEP3_MAX_WORKERS,
-    TEXT_DIR,
-    build_target_regex,
-)
+import config
 from record_keys import (
     clean_str,
     make_record_key,
@@ -362,7 +346,9 @@ def download_pdf(
     save_path: str,
     *,
     max_pdf_mb: int | None = None,
+    timeout: int | None = None,
     session: requests.Session | None = None,
+    ctx: config.MetalRunContext | None = None,
 ) -> tuple[bool, str]:
     """
     下載 PDF 檔案並於串流階段即時驗證：
@@ -374,7 +360,11 @@ def download_pdf(
     if not url or not str(url).startswith("http"):
         return False, "無效的 URL"
 
-    size_limit_mb = STEP3_MAX_PDF_MB if max_pdf_mb is None else max_pdf_mb
+    settings = ctx.settings if ctx is not None else (
+        config.load_settings() if (max_pdf_mb is None or timeout is None) else None
+    )
+    size_limit_mb = settings.step3_max_pdf_mb if max_pdf_mb is None else max_pdf_mb
+    req_timeout = settings.request_timeout if timeout is None else timeout
     max_bytes = max(1, int(size_limit_mb)) * 1024 * 1024
     client = session if session is not None else _get_thread_session()
 
@@ -382,7 +372,7 @@ def download_pdf(
         with client.get(
             url,
             headers=DEFAULT_HEADERS,
-            timeout=REQUEST_TIMEOUT * 2,
+            timeout=req_timeout * 2,
             stream=True,
             allow_redirects=True,
         ) as resp:
@@ -445,11 +435,16 @@ def download_pdf(
         return False, f"其他錯誤 ({e})"
 
 
-def run_download(retry_failed: bool | None = None):
-    if retry_failed is None:
-        retry_failed = os.environ.get("TAFEL_RETRY_FAILED") == "1"
+def run_download(
+    retry_failed: bool = False,
+    *,
+    ctx: config.MetalRunContext | None = None,
+):
+    ctx = ctx or config.default_metal_context()
+    ctx.ensure_dirs()
+    settings = ctx.settings
 
-    if ENABLE_EUROPEPMC_XML:
+    if settings.enable_europepmc_xml:
         from europepmc_fetcher import (
             fetch_fulltext_xml,
             run_europepmc_search,
@@ -457,14 +452,14 @@ def run_download(retry_failed: bool | None = None):
             try_fallback_from_europepmc,
         )
 
-    if not os.path.exists(STEP2_OUTPUT):
-        print(f"⚠️  找不到 Step 2 的輸出檔案：{STEP2_OUTPUT}")
-        if ENABLE_EUROPEPMC_XML and EUROPEPMC_MAX_PAPERS > 0:
-            run_europepmc_search()
+    if not os.path.exists(ctx.step2_output):
+        print(f"⚠️  找不到 Step 2 的輸出檔案：{ctx.step2_output}")
+        if settings.enable_europepmc_xml and settings.europepmc_max_papers > 0:
+            run_europepmc_search(ctx=ctx)
         return
 
-    df = pd.read_csv(STEP2_OUTPUT)
-    print(f"Loaded {len(df)} papers from {STEP2_OUTPUT}")
+    df = pd.read_csv(ctx.step2_output)
+    print(f"Loaded {len(df)} papers from {ctx.step2_output}")
 
     # 篩出「有 PDF 連結」或「有 Europe PMC PMCID」的候選論文
     has_pdf_mask = df.get("final_pdf_url", pd.Series(dtype=object)).notna()
@@ -480,8 +475,8 @@ def run_download(retry_failed: bool | None = None):
     )
 
     # 相關性篩選：標題或摘要必須提到目標金屬（或其化合物）
-    if REQUIRE_TARGET_IN_TITLE_ABSTRACT and len(df_candidates):
-        pat = build_target_regex()
+    if settings.require_target_in_title_abstract and len(df_candidates):
+        pat = ctx.target_regex
         ta = (
             df_candidates.get("title", pd.Series("", index=df_candidates.index)).fillna("").astype(str)
             + " "
@@ -489,19 +484,19 @@ def run_download(retry_failed: bool | None = None):
         )
         mask = ta.apply(lambda s: bool(pat.search(s)))
         print(
-            f"Relevance filter ({METAL_SYMBOL} in title/abstract): "
+            f"Relevance filter ({ctx.metal_symbol} in title/abstract): "
             f"kept {int(mask.sum())} / {len(df_candidates)}"
         )
         df_candidates = df_candidates[mask]
 
-    os.makedirs(PDF_DIR, exist_ok=True)
-    os.makedirs(TEXT_DIR, exist_ok=True)
+    os.makedirs(ctx.pdf_dir, exist_ok=True)
+    os.makedirs(ctx.text_dir, exist_ok=True)
 
     state = load_or_bootstrap_download_state(
-        DOWNLOAD_STATE_PATH, df_candidates, PDF_DIR, TEXT_DIR
+        ctx.download_state_path, df_candidates, ctx.pdf_dir, ctx.text_dir
     )
     pending_rows, qstats = select_pending_rows(
-        df_candidates, state, PDF_DIR, TEXT_DIR, retry_failed=retry_failed
+        df_candidates, state, ctx.pdf_dir, ctx.text_dir, retry_failed=retry_failed
     )
 
     extra_note = ""
@@ -509,21 +504,22 @@ def run_download(retry_failed: bool | None = None):
         extra_note += f" | --retry-failed 重試: {qstats['retry_forced']}"
     if qstats["retry_new_source"]:
         extra_note += f" | 補到新來源重試: {qstats['retry_new_source']}"
-    workers = max(1, int(STEP3_MAX_WORKERS))
+    workers = max(1, int(settings.step3_max_workers))
     print(
         f"[Step 3 Queue] 總候選: {qstats['total']} | 已下載略過: {qstats['skipped_done']} "
         f"| 先前失敗略過: {qstats['skipped_failed']} | 本次待下載: {len(pending_rows)}"
-        f" (workers={workers}, domain_delay={DOWNLOAD_DELAY}s, 403_breaker={STEP3_DOMAIN_403_THRESHOLD}){extra_note}"
+        f" (workers={workers}, domain_delay={settings.download_delay}s, "
+        f"403_breaker={settings.step3_domain_403_threshold}){extra_note}"
     )
 
     if not pending_rows:
-        save_download_state(DOWNLOAD_STATE_PATH, state)
+        save_download_state(ctx.download_state_path, state)
         print("✨ 沒有新的待下載論文（若需重試先前失敗的論文，請加上 --retry-failed）。")
         return
 
-    pdf_limiter = DomainRateLimiter(DOWNLOAD_DELAY)
-    epmc_limiter = DomainRateLimiter(EUROPEPMC_DELAY)
-    breaker = DomainCircuitBreaker(STEP3_DOMAIN_403_THRESHOLD)
+    pdf_limiter = DomainRateLimiter(settings.download_delay)
+    epmc_limiter = DomainRateLimiter(settings.europepmc_delay)
+    breaker = DomainCircuitBreaker(settings.step3_domain_403_threshold)
     state_lock = threading.Lock()
 
     success = 0
@@ -547,11 +543,11 @@ def run_download(retry_failed: bool | None = None):
         merged_urls = list(dict.fromkeys([*prev_urls, *candidate_urls]))
 
         # 1. 若已有 Europe PMC PMCID，優先直接抓取開放全文 JATS XML（零 403、含結構化表格）
-        if pmcid and ENABLE_EUROPEPMC_XML:
+        if pmcid and settings.enable_europepmc_xml:
             epmc_limiter.wait("europepmc.org")
-            xml_text = fetch_fulltext_xml(pmcid)
+            xml_text = fetch_fulltext_xml(pmcid, timeout=settings.request_timeout * 2)
             if xml_text:
-                w_txt, u_tbl, _ = save_xml_to_texts(xml_text, base_name, TEXT_DIR)
+                w_txt, u_tbl, _ = save_xml_to_texts(xml_text, base_name, ctx.text_dir)
                 if w_txt or u_tbl:
                     _write_epmc_marker(epmc_marker, pmcid)
                     return (
@@ -571,7 +567,12 @@ def run_download(retry_failed: bool | None = None):
                 continue
 
             pdf_limiter.wait(host)
-            ok, reason = download_pdf(url, save_path)
+            ok, reason = download_pdf(
+                url,
+                save_path,
+                max_pdf_mb=settings.step3_max_pdf_mb,
+                timeout=settings.request_timeout,
+            )
             if ok:
                 breaker.record_success(host)
                 downloaded = True
@@ -579,7 +580,7 @@ def run_download(retry_failed: bool | None = None):
             if reason.startswith("403"):
                 if breaker.record_403(host):
                     print(
-                        f"\n  ⚡ [Step 3 Breaker] 網域 {host} 連續 {STEP3_DOMAIN_403_THRESHOLD} 次 403，"
+                        f"\n  ⚡ [Step 3 Breaker] 網域 {host} 連續 {settings.step3_domain_403_threshold} 次 403，"
                         "本輪自動跳過該網域後續 PDF 連結。"
                     )
             last_reason = reason
@@ -593,9 +594,9 @@ def run_download(retry_failed: bool | None = None):
             )
 
         # 3. Europe PMC DOI fallback 補救
-        if ENABLE_EUROPEPMC_XML and doi and not pmcid:
+        if settings.enable_europepmc_xml and doi and not pmcid:
             epmc_limiter.wait("europepmc.org")
-            rescued, _ = try_fallback_from_europepmc(doi, base_name, TEXT_DIR)
+            rescued, _ = try_fallback_from_europepmc(doi, base_name, ctx.text_dir, ctx=ctx)
             if rescued:
                 _write_epmc_marker(epmc_marker, "fallback")
                 return (
@@ -639,7 +640,7 @@ def run_download(retry_failed: bool | None = None):
                 if reason:
                     fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
             if completed_idx % 20 == 0:
-                save_download_state(DOWNLOAD_STATE_PATH, state)
+                save_download_state(ctx.download_state_path, state)
 
     try:
         if workers == 1:
@@ -668,7 +669,7 @@ def run_download(retry_failed: bool | None = None):
                     pool.shutdown(wait=True)
     finally:
         with state_lock:
-            save_download_state(DOWNLOAD_STATE_PATH, state)
+            save_download_state(ctx.download_state_path, state)
 
     print(
         f"\n下載統計：✅ PDF 成功: {success}, 🧬 Europe PMC XML 直接: {epmc_direct}, "
@@ -692,4 +693,9 @@ if __name__ == "__main__":
         help="重試先前下載失敗（failed / failed_legacy）的論文",
     )
     cli_args = parser.parse_args()
-    run_download(retry_failed=cli_args.retry_failed)
+    _cli_ctx = config.default_metal_context()
+    _cli_ctx.print_summary()
+    run_download(
+        retry_failed=cli_args.retry_failed or (os.environ.get("TAFEL_RETRY_FAILED") == "1"),
+        ctx=_cli_ctx,
+    )

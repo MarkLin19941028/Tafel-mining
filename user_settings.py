@@ -19,8 +19,8 @@ SKIP_EXISTING_STEP2: bool = True            # 建議 True（搭配 --append 只�
 
 # ✏️ Step 1 搜尋過程中即時比對去重（跳過既有 metadata 與本次已見論文，兼顧效能與增量效益）
 STEP1_INFLIGHT_DEDUP: bool = True           # 建議 True（開啟即時去重與欄位回補）
-STEP1_MAX_SCAN_MULTIPLIER: int = 2          # 建議 2（已有跨次游標續頁，不需設太高；想單輪深挖可調至 3）
-STEP1_EARLY_STOP_EMPTY_PAGES: int = 2       # 建議 2（連續 2 頁無新論文即停；設 1 較省配額但遇跨源重疊頁易過早停止）
+STEP1_MAX_SCAN_MULTIPLIER: int = 3          # 建議 2（已有跨次游標續頁，不需設太高；想單輪深挖可調至 3）
+STEP1_EARLY_STOP_EMPTY_PAGES: int = 3       # 建議 2（連續 2 頁無新論文即停；設 1 較省配額但遇跨源重疊頁易過早停止）
 
 # ✏️ OpenAlex 每組查詢單輪最多新增篇數（不含重複與無關篇數）
 MAX_RECORDS_PER_QUERY: int = 200            # 濃縮模式建議 200（= 1 頁/組，省配額）；展開模式建議 50~100；稀缺材料可調 400
@@ -41,7 +41,7 @@ STEP3_MAX_PDF_MB: int = 50                  # 建議 50（單一 PDF 上限 MB�
 REQUEST_TIMEOUT: int = 30                   # 建議 30（網路不穩時可調至 45）
 
 # ✏️ 搜尋文獻的起始發表年份（建議 2000~2005；2000 年前 OA 比例低且多為掃描檔）
-FROM_YEAR: int = 2005                       # 建議 2005（歷史稀缺材料可放寬至 2000）
+FROM_YEAR: int = 2000                       # 建議 2000~2005（已放寬至 2000 以擴大 Ru/TiN/Mo 等稀缺材料歷史覆蓋）
 
 
 # ============================================================

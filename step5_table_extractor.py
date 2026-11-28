@@ -8,22 +8,22 @@ from collections import Counter
 
 import numpy as np
 
-from config import (
-    METAL_SYMBOL,
-    MIN_MATERIAL_MENTIONS,
-    TAFEL_MAX,
-    TAFEL_MIN,
-)
+import config
 from step5_constants import (
     convert_log_icorr_to_uA_cm2,
-    convert_to_she,
     normalize_ecorr_to_v,
     normalize_icorr_to_uA_cm2,
     normalize_text,
     parse_scientific,
 )
+from step5_schema import (
+    PaperEnvironment,
+    RawEchemRecord,
+    load_chemical_species_registry,
+    normalize_tafel_slope,
+    resolve_ecorr_she,
+)
 from step5_text_extractor import (
-    SPECIES_CATEGORIES,
     assign_material,
     format_counts,
     generate_solution_id,
@@ -36,17 +36,7 @@ from step5_text_extractor import (
 # 10. TABLE EXTRACTION (Column-Mapped Structured Parser)
 # ====================================================================
 
-_INHIBITOR_SPECIES_SORTED = sorted(
-    [k for k, v in SPECIES_CATEGORIES.items() if v.get("role") == "inhibitor"],
-    key=len,
-    reverse=True,
-)
-_INHIBITOR_NAME_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<inh>"
-    + "|".join(re.escape(s).replace(r"\ ", r"\s+") for s in _INHIBITOR_SPECIES_SORTED)
-    + r")(?![A-Za-z0-9])",
-    re.I,
-)
+_INHIBITOR_NAME_RE = load_chemical_species_registry().inhibitor_name_pattern
 
 _COL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("conc", re.compile(r"(?:\bconc(?:entration)?\.?\b|\bc\s*_?\s*inh\b|\bdosage\b|^\s*c\s*[\(\[/])", re.I)),
@@ -123,9 +113,19 @@ def parse_structured_table(
     source_id: str,
     table_idx: int,
     paper_counts: Counter | None = None,
-    paper_env: dict | None = None,
+    paper_env: PaperEnvironment | dict | None = None,
+    *,
+    paper_environment: PaperEnvironment | dict | None = None,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict]:
     """以表頭欄位對齊的方式解析電化學表格，精準配對每一列的樣品與數值。"""
+    resolved_ctx = ctx if ctx is not None else config.default_metal_context()
+    settings = resolved_ctx.settings
+    metal_symbol = resolved_ctx.metal_symbol
+    min_mentions = settings.min_material_mentions
+    tafel_min = settings.tafel_min
+    tafel_max = settings.tafel_max
+
     if not table or len(table) < 2:
         return []
     max_cols = max(len(r) for r in table)
@@ -168,13 +168,15 @@ def parse_structured_table(
     if sample_col is None and 0 not in col_map:
         sample_col = 0
 
-    paper_env = paper_env or {}
-    paper_els = paper_env.get("electrolytes", [])
-    paper_ph_counts = paper_env.get("ph_counts", Counter())
-    paper_temp_counts = paper_env.get("temp_counts", Counter())
-    ref_counts = paper_env.get("ref_counts", Counter())
-    refs = paper_env.get("refs", [])
-    table_captions = paper_env.get("table_captions") or {}
+    env = PaperEnvironment.from_mapping(
+        paper_environment if paper_environment is not None else paper_env
+    )
+    paper_els = env.electrolytes
+    paper_ph_counts = env.ph_counts
+    paper_temp_counts = env.temp_counts
+    ref_counts = env.ref_counts
+    refs = env.refs
+    table_captions = env.table_captions
     table_caption = table_captions.get(table_idx, "")
     if not table_caption and len(table_captions) == 1:
         # 若整篇論文只有單一編號表格（例如跨頁拆表或無編號附表），沿用該唯一表題
@@ -192,14 +194,14 @@ def parse_structured_table(
         if primary_ref
         else list(refs)
     )
-    paper_reactions = paper_env.get("reactions", [])
+    paper_reactions = list(env.reactions)
     if "corrosion" not in paper_reactions and any(
         r in {"Ecorr", "log_icorr", "icorr", "Rp", "CR"} for r, _ in col_map.values()
     ):
-        paper_reactions = list(paper_reactions) + ["corrosion"]
+        paper_reactions.append("corrosion")
 
     materials_sorted, materials_counts_str = format_counts(
-        paper_counts or Counter(), MIN_MATERIAL_MENTIONS
+        paper_counts or Counter(), min_mentions
     )
     paper_primary = paper_counts.most_common(1)[0][0] if paper_counts else None
 
@@ -266,11 +268,6 @@ def parse_structured_table(
                 ecorr_unit = unit or "mV (inferred)"
                 if warn:
                     rec_notes.append(warn)
-                if v is not None and primary_ref:
-                    ecorr_v_she = convert_to_she(
-                        v, primary_ref,
-                        paper_ph_counts.most_common(1)[0][0] if paper_ph_counts else None,
-                    )
             elif role == "log_icorr":
                 converted = convert_log_icorr_to_uA_cm2(val, unit)
                 if converted is not None:
@@ -289,30 +286,37 @@ def parse_structured_table(
                 else:
                     rec_notes.append(f"rejected non-positive icorr={cell_str}")
             elif role == "beta_a":
-                v = abs(val)
-                if unit and "v" in unit.lower() and "mv" not in unit.lower():
-                    v *= 1000.0
-                if unit and "dec" not in unit.lower() and "mv" in unit.lower():
-                    rec_notes.append(f"βa unit '({unit})' interpreted as mV/dec")
-                if TAFEL_MIN <= v <= 1000:
-                    beta_a = v
-                    if v > TAFEL_MAX:
-                        rec_notes.append(f"βa={v:.1f} exceeds TAFEL_MAX={TAFEL_MAX}")
+                beta_a, notes = normalize_tafel_slope(
+                    val,
+                    unit,
+                    tafel_min=tafel_min,
+                    tafel_max=tafel_max,
+                    label="βa",
+                    allow_above_max=True,
+                    note_mv_without_dec=True,
+                )
+                rec_notes.extend(notes)
             elif role == "beta_c":
-                v = abs(val)
-                if unit and "v" in unit.lower() and "mv" not in unit.lower():
-                    v *= 1000.0
-                if unit and "dec" not in unit.lower() and "mv" in unit.lower():
-                    rec_notes.append(f"βc unit '({unit})' interpreted as mV/dec")
-                if TAFEL_MIN <= v <= 1000:
-                    beta_c = v
-                    if v > TAFEL_MAX:
-                        rec_notes.append(f"βc={v:.1f} exceeds TAFEL_MAX={TAFEL_MAX}")
+                beta_c, notes = normalize_tafel_slope(
+                    val,
+                    unit,
+                    tafel_min=tafel_min,
+                    tafel_max=tafel_max,
+                    label="βc",
+                    allow_above_max=True,
+                    note_mv_without_dec=True,
+                )
+                rec_notes.extend(notes)
             elif role == "tafel":
-                v = abs(val)
-                if unit and "v" in unit.lower() and "mv" not in unit.lower():
-                    v *= 1000.0
-                if TAFEL_MIN <= v <= 1000:
+                v, _ = normalize_tafel_slope(
+                    val,
+                    unit,
+                    tafel_min=tafel_min,
+                    tafel_max=tafel_max,
+                    label="Tafel",
+                    allow_above_max=True,
+                )
+                if v is not None:
                     tafel_gen = str(round(v, 2))
             elif role == "CR":
                 cr_val = val
@@ -325,62 +329,65 @@ def parse_structured_table(
             continue
 
         ctxs = [synth_inh_ctx, sample_name or "", row_text, table_caption]
-        mat_id, mat_method = assign_material([sample_name or "", row_text], paper_counts or Counter())
+        mat_id, mat_method = assign_material(
+            [sample_name or "", row_text],
+            paper_counts or Counter(),
+            ctx=resolved_ctx,
+        )
         rec_els, rec_ph, rec_temp = select_environment_for_record(
             ctxs, paper_els, paper_ph_counts, paper_temp_counts
         )
         # 若環境已解析出該列/該表專屬 pH 且參考電極為 RHE，重新換算 Ecorr_V_SHE
-        if ecorr_v_orig is not None and primary_ref:
-            ecorr_v_she = convert_to_she(ecorr_v_orig, primary_ref, rec_ph)
+        ecorr_v_she = resolve_ecorr_she(ecorr_v_orig, primary_ref, rec_ph)
         sol_id = generate_solution_id(rec_els, rec_ph, rec_temp) if (rec_els or rec_ph is not None) else None
 
-        rec = {
-            "source_id": f"{source_id}_table{table_idx + 1}_row{row_offset}",
-            "sample_name": sample_name,
-            "materials_raw": sample_name or "",
-            "materials_normalised": materials_sorted,
-            "material_mention_counts": materials_counts_str,
-            "paper_primary_material": paper_primary,
-            "target_mentions": (paper_counts or Counter()).get(METAL_SYMBOL, 0),
-            "material_id_assigned": mat_id,
-            "material_assignment_method": mat_method,
-            "is_target_metal": (mat_id == METAL_SYMBOL),
-            "metal_form": paper_env.get("metal_form"),
-            "surface_preparation": paper_env.get("surface_preparation"),
-            "record_electrolytes": rec_els,
-            "electrolytes_raw": "; ".join(f"{e['conc']} {e['unit']} {e['species']}" for e in rec_els),
-            "record_ph": rec_ph,
-            "ph_values": str(rec_ph) if rec_ph is not None else None,
-            "record_temp": rec_temp,
-            "temperature_C_values": str(rec_temp) if rec_temp is not None else None,
-            "solution_id_assigned": sol_id,
-            "reference_electrodes": "; ".join(ordered_refs) if ordered_refs else None,
-            "deaerated": paper_env.get("deaerated", False),
-            "aerated": paper_env.get("aerated", False),
-            "o2_saturated": paper_env.get("o2_saturated", False),
-            "measurement_methods": paper_env.get("measurement_methods"),
-            "scan_rates_raw": paper_env.get("scan_rates_raw"),
-            "reactions": "; ".join(paper_reactions) if paper_reactions else None,
-            "immersion_times_raw": paper_env.get("immersion_times_raw"),
-            "extraction_method": "table_column_mapped",
-            "context": f"Table {table_idx + 1}, Row {row_offset}: {row_text}",
-            "Ecorr_V_original": ecorr_v_orig,
-            "Ecorr_unit_original": ecorr_unit,
-            "Ecorr_raw": ecorr_raw,
-            "Ecorr_V_SHE": ecorr_v_she,
-            "icorr_uA_cm2": icorr_uA,
-            "icorr_raw": icorr_raw,
-            "icorr_unit_original": icorr_unit,
-            "log_icorr": log_icorr,
-            "beta_a_mV_dec": beta_a,
-            "beta_c_mV_dec": beta_c,
-            "tafel_slopes_general_mV_dec": tafel_gen,
-            "CR_reported_value": cr_val,
-            "CR_reported_unit": cr_unit,
-            "Rp_value": rp_val,
-            "Rp_unit": rp_unit,
-            "extra_quality_notes": "; ".join(rec_notes) if rec_notes else "",
-        }
+        rec = RawEchemRecord(
+            source_id=f"{source_id}_table{table_idx + 1}_row{row_offset}",
+            sample_name=sample_name,
+            materials_raw=sample_name or "",
+            materials_normalised=materials_sorted,
+            material_mention_counts=materials_counts_str,
+            paper_primary_material=paper_primary,
+            target_mentions=(paper_counts or Counter()).get(metal_symbol, 0),
+            material_id_assigned=mat_id,
+            material_assignment_method=mat_method,
+            is_target_metal=(mat_id == metal_symbol),
+            metal_form=env.metal_form,
+            surface_preparation=env.surface_preparation,
+            record_electrolytes=rec_els,
+            electrolytes_raw="; ".join(f"{e['conc']} {e['unit']} {e['species']}" for e in rec_els),
+            record_ph=rec_ph,
+            ph_values=str(rec_ph) if rec_ph is not None else None,
+            record_temp=rec_temp,
+            temperature_C_values=str(rec_temp) if rec_temp is not None else None,
+            solution_id_assigned=sol_id,
+            reference_electrodes="; ".join(ordered_refs) if ordered_refs else None,
+            deaerated=env.deaerated,
+            aerated=env.aerated,
+            o2_saturated=env.o2_saturated,
+            measurement_methods=env.measurement_methods,
+            scan_rates_raw=env.scan_rates_raw,
+            reactions="; ".join(paper_reactions) if paper_reactions else None,
+            immersion_times_raw=env.immersion_times_raw,
+            extraction_method="table_column_mapped",
+            context=f"Table {table_idx + 1}, Row {row_offset}: {row_text}",
+            Ecorr_V_original=ecorr_v_orig,
+            Ecorr_unit_original=ecorr_unit,
+            Ecorr_raw=ecorr_raw,
+            Ecorr_V_SHE=ecorr_v_she,
+            icorr_uA_cm2=icorr_uA,
+            icorr_raw=icorr_raw,
+            icorr_unit_original=icorr_unit,
+            log_icorr=log_icorr,
+            beta_a_mV_dec=beta_a,
+            beta_c_mV_dec=beta_c,
+            tafel_slopes_general_mV_dec=tafel_gen,
+            CR_reported_value=cr_val,
+            CR_reported_unit=cr_unit,
+            Rp_value=rp_val,
+            Rp_unit=rp_unit,
+            extra_quality_notes="; ".join(rec_notes) if rec_notes else "",
+        ).to_dict()
         records.append(rec)
 
     return records
@@ -390,7 +397,10 @@ def extract_from_tables(
     tables_json_path: str,
     source_id: str,
     paper_counts: Counter | None = None,
-    paper_env: dict | None = None,
+    paper_env: PaperEnvironment | dict | None = None,
+    *,
+    paper_environment: PaperEnvironment | dict | None = None,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict]:
     records = []
     try:
@@ -399,11 +409,13 @@ def extract_from_tables(
     except Exception:
         return records
 
+    resolved_env = paper_environment if paper_environment is not None else paper_env
     for table_idx, table in enumerate(tables):
         parsed = parse_structured_table(
             table, source_id, table_idx,
             paper_counts=paper_counts,
-            paper_env=paper_env,
+            paper_environment=resolved_env,
+            ctx=ctx,
         )
         records.extend(parsed)
 

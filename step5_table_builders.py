@@ -7,13 +7,7 @@ import re
 
 import pandas as pd
 
-from config import (
-    ECORR_VALID_RANGE_V_SHE,
-    FILTER_OUTLIERS,
-    ICORR_VALID_RANGE_UA_CM2,
-    KEEP_ONLY_TARGET_METAL,
-    METAL_SYMBOL,
-)
+import config
 from step5_constants import (
     KNOWN_MATERIALS,
     PURE_MATERIAL_CLASSES,
@@ -102,12 +96,39 @@ def is_eligible_echem_record(rec: dict) -> bool:
 
  
 
-def build_material_properties(raw_records: list[dict]) -> pd.DataFrame:
+def _resolve_builder_scope(
+    ctx: config.MetalRunContext | None,
+    keep_only_target: bool | None,
+    target_symbol: str | None,
+) -> tuple[bool, str]:
+    if ctx is not None:
+        keep_flag = ctx.settings.keep_only_target_metal if keep_only_target is None else keep_only_target
+        symbol = ctx.metal_symbol if target_symbol is None else target_symbol
+        return keep_flag, symbol
+    if keep_only_target is None or target_symbol is None:
+        default_ctx = config.default_metal_context()
+        keep_flag = (
+            default_ctx.settings.keep_only_target_metal
+            if keep_only_target is None
+            else keep_only_target
+        )
+        symbol = default_ctx.metal_symbol if target_symbol is None else target_symbol
+        return keep_flag, symbol
+    return keep_only_target, target_symbol
 
+
+def build_material_properties(
+    raw_records: list[dict],
+    *,
+    ctx: config.MetalRunContext | None = None,
+    keep_only_target: bool | None = None,
+    target_symbol: str | None = None,
+) -> pd.DataFrame:
+    keep_target, metal_symbol = _resolve_builder_scope(ctx, keep_only_target, target_symbol)
     detected_materials = set()
 
     for rec in raw_records:
-        if KEEP_ONLY_TARGET_METAL and not rec.get("is_target_metal", False):
+        if keep_target and not rec.get("is_target_metal", False):
             continue
         # 只列入「實際被指派到電化學數據」的材料（目標金屬另外保證存在）
         mid = rec.get("material_id_assigned")
@@ -130,13 +151,13 @@ def build_material_properties(raw_records: list[dict]) -> pd.DataFrame:
 
  
 
-    # 確保目標金屬一定存在                                     # ✅ 用 config
+    # 確保目標金屬一定存在
 
-    if METAL_SYMBOL not in detected_materials and METAL_SYMBOL in KNOWN_MATERIALS:
+    if metal_symbol and metal_symbol not in detected_materials and metal_symbol in KNOWN_MATERIALS:
 
-        props = KNOWN_MATERIALS[METAL_SYMBOL]
+        props = KNOWN_MATERIALS[metal_symbol]
 
-        row = {"material_id": METAL_SYMBOL}
+        row = {"material_id": metal_symbol}
 
         row.update(props)
 
@@ -152,13 +173,20 @@ def build_material_properties(raw_records: list[dict]) -> pd.DataFrame:
 
  
 
-def build_solution_properties(raw_records: list[dict]) -> pd.DataFrame:
+def build_solution_properties(
+    raw_records: list[dict],
+    *,
+    ctx: config.MetalRunContext | None = None,
+    keep_only_target: bool | None = None,
+    target_symbol: str | None = None,
+) -> pd.DataFrame:
+    keep_target, metal_symbol = _resolve_builder_scope(ctx, keep_only_target, target_symbol)
     solutions: dict[str, dict] = {}
     sol_sources: dict[str, list[str]] = {}
     sol_materials: dict[str, list[str]] = {}
 
     for rec in raw_records:
-        if KEEP_ONLY_TARGET_METAL and not rec.get("is_target_metal", False):
+        if keep_target and not rec.get("is_target_metal", False):
             continue
 
         components = rec.get("record_electrolytes")
@@ -292,7 +320,7 @@ def build_solution_properties(raw_records: list[dict]) -> pd.DataFrame:
             sol_sources[sol_id].append(src_id)
         if mat_id and mat_id not in sol_materials[sol_id]:
             sol_materials[sol_id].append(mat_id)
-        if mat_id == METAL_SYMBOL:
+        if metal_symbol and mat_id == metal_symbol:
             solutions[sol_id]["is_target_metal"] = True
 
     for sol_id, sol_rec in solutions.items():
@@ -306,9 +334,18 @@ def build_electrochemical_database(
 
     raw_records: list[dict],
 
-    solution_df: pd.DataFrame
+    solution_df: pd.DataFrame,
+
+    *,
+
+    ctx: config.MetalRunContext | None = None,
+
+    keep_only_target: bool | None = None,
+
+    target_symbol: str | None = None,
 
 ) -> pd.DataFrame:
+    keep_target, metal_symbol = _resolve_builder_scope(ctx, keep_only_target, target_symbol)
 
     rows = []
 
@@ -443,7 +480,7 @@ def build_electrochemical_database(
 
             "metal": material_id,
             "material_class": classify_material_class(material_id, rec.get("sample_name")),
-            "is_target_metal": material_id == METAL_SYMBOL,
+            "is_target_metal": bool(metal_symbol and material_id == metal_symbol),
             "material_assignment_method": rec.get("material_assignment_method"),
             "paper_primary_material": rec.get("paper_primary_material"),
             "material_mention_counts": rec.get("material_mention_counts"),
@@ -518,7 +555,7 @@ def build_electrochemical_database(
 
     df = pd.DataFrame(rows)
 
-    if KEEP_ONLY_TARGET_METAL and not df.empty:
+    if keep_target and not df.empty:
         before = len(df)
         df = df[df["is_target_metal"]].reset_index(drop=True)
         print(f"  KEEP_ONLY_TARGET_METAL: {before} -> {len(df)} records")
@@ -571,8 +608,19 @@ def _estimate_quality(rec: dict) -> float:
 
  
 
-def check_outlier_reason(row: dict) -> str | None:
+def check_outlier_reason(
+    row: dict,
+    *,
+    settings: config.PipelineSettings | None = None,
+    ctx: config.MetalRunContext | None = None,
+) -> str | None:
     """檢查單筆電化學記錄是否超出物理合理區間，回傳原因字串或 None。"""
+    resolved_settings = settings or (
+        ctx.settings if ctx is not None else config.load_settings()
+    )
+    ecorr_ranges = resolved_settings.ecorr_valid_range_v_she
+    icorr_range = resolved_settings.icorr_valid_range_ua_cm2
+
     reasons = []
     mat = row.get("material_id") or "default"
     mat_class = row.get("material_class") or "pure"
@@ -582,25 +630,33 @@ def check_outlier_reason(row: dict) -> str | None:
         and ecorr_she is not None
         and not pd.isna(ecorr_she)
     ):
-        lo, hi = ECORR_VALID_RANGE_V_SHE.get(mat, ECORR_VALID_RANGE_V_SHE["default"])
+        lo, hi = ecorr_ranges.get(mat, ecorr_ranges["default"])
         if not (lo <= float(ecorr_she) <= hi):
             reasons.append(f"Ecorr_V_SHE={ecorr_she} out of [{lo}, {hi}] V for {mat}")
 
     icorr = row.get("icorr_uA_cm2")
     if icorr is not None and not pd.isna(icorr):
-        ilo, ihi = ICORR_VALID_RANGE_UA_CM2
+        ilo, ihi = icorr_range
         if not (ilo <= float(icorr) <= ihi):
             reasons.append(f"icorr_uA_cm2={icorr} out of [{ilo}, {ihi}] uA/cm2")
 
     return "; ".join(reasons) if reasons else None
 
 
-def filter_echem_outliers(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """依 config.FILTER_OUTLIERS 分離正常資料與離群值。"""
-    if df.empty or not FILTER_OUTLIERS:
+def filter_echem_outliers(
+    df: pd.DataFrame,
+    *,
+    settings: config.PipelineSettings | None = None,
+    ctx: config.MetalRunContext | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """依 settings.filter_outliers 分離正常資料與離群值。"""
+    resolved_settings = settings or (
+        ctx.settings if ctx is not None else config.load_settings()
+    )
+    if df.empty or not resolved_settings.filter_outliers:
         return df, pd.DataFrame(columns=list(df.columns) + ["outlier_reason"])
 
-    reasons = [check_outlier_reason(r) for _, r in df.iterrows()]
+    reasons = [check_outlier_reason(r, settings=resolved_settings) for _, r in df.iterrows()]
     is_out = [r is not None for r in reasons]
     outliers = df[is_out].copy()
     outliers["outlier_reason"] = [r for r in reasons if r is not None]

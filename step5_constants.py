@@ -43,6 +43,8 @@ REF_ELECTRODE_TO_SHE: dict[str, float] = {
 
     "saturated calomel": 0.241,
 
+    "Hg/Hg2Cl2": 0.241,
+
     "Ag/AgCl": 0.197,
 
     "Ag/AgCl (3M KCl)": 0.210,
@@ -59,9 +61,17 @@ REF_ELECTRODE_TO_SHE: dict[str, float] = {
 
     "MSE": 0.640,
 
+    "SMSE": 0.640,
+
+    "MMS": 0.640,
+
     "mercury sulfate": 0.640,
 
     "mercury-sulfate": 0.640,
+
+    "Cu/CuSO4": 0.314,
+
+    "CSE": 0.314,
 
     "RHE": None,
 

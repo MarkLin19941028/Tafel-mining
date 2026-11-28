@@ -13,21 +13,7 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-from config import (
-    DOWNLOAD_STATE_PATH,
-    ENABLE_SEMANTIC_SCHOLAR,
-    MAILTO,
-    PDF_DIR,
-    REQUEST_TIMEOUT,
-    REQUIRE_TARGET_IN_TITLE_ABSTRACT,
-    STEP1_OUTPUT,
-    STEP2_CHECKPOINT_EVERY,
-    STEP2_OUTPUT,
-    STEP2_SKIP_UNPAYWALL_IF_HAS_PDF,
-    STEP2_UNPAYWALL_DELAY,
-    TEXT_DIR,
-    build_target_regex,
-)
+import config
 from record_keys import (
     is_title_abstract_relevant,
     normalize_doi_key,
@@ -49,18 +35,30 @@ def _has_http_url(val) -> bool:
     return pd.notna(val) and str(val).strip().startswith("http")
 
 
-def find_pdf_url(doi: str) -> dict:
+def find_pdf_url(
+    doi: str,
+    *,
+    mailto: str | None = None,
+    timeout: int | None = None,
+    ctx: config.MetalRunContext | None = None,
+) -> dict:
+    settings = ctx.settings if ctx is not None else (
+        config.load_settings() if (mailto is None or timeout is None) else None
+    )
+    effective_mailto = mailto if mailto is not None else settings.mailto
+    effective_timeout = timeout if timeout is not None else settings.request_timeout
+
     doi_clean = str(doi).replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
     url = f"{UNPAYWALL_BASE}/{doi_clean}"
-    params = {"email": MAILTO}
+    params = {"email": effective_mailto}
 
     try:
-        resp = _SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        resp = _SESSION.get(url, params=params, timeout=effective_timeout)
         if resp.status_code == 404:
             return {"unpaywall_pdf_url": None, "license": None}
         if resp.status_code == 429:
             time.sleep(30)
-            resp = _SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            resp = _SESSION.get(url, params=params, timeout=effective_timeout)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -77,19 +75,29 @@ def find_pdf_url(doi: str) -> dict:
 
 def _bootstrap_state_from_prev_step2(
     prev_df: pd.DataFrame,
-    state_path: str = DOWNLOAD_STATE_PATH,
-    pdf_dir: str = PDF_DIR,
-    text_dir: str = TEXT_DIR,
+    state_path: str | None = None,
+    pdf_dir: str | None = None,
+    text_dir: str | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> None:
     """
     在 --append 覆寫舊 Step 2 CSV 之前，若尚未建立下載狀態表，
     先以「舊 Step 2 CSV」執行離線初始化，避免本次新增論文在 Step 3 被誤標為 failed_legacy。
     """
-    if os.path.exists(state_path):
+    resolved_ctx = ctx
+    if resolved_ctx is None and (state_path is None or pdf_dir is None or text_dir is None):
+        resolved_ctx = config.default_metal_context()
+
+    resolved_state = state_path or resolved_ctx.download_state_path
+    resolved_pdf = pdf_dir or resolved_ctx.pdf_dir
+    resolved_text = text_dir or resolved_ctx.text_dir
+
+    if os.path.exists(resolved_state):
         return
     from step3_download_pdfs import load_or_bootstrap_download_state
 
-    load_or_bootstrap_download_state(state_path, prev_df, pdf_dir, text_dir)
+    load_or_bootstrap_download_state(resolved_state, prev_df, resolved_pdf, resolved_text)
 
 
 def _pick_best_pdf(row):
@@ -100,10 +108,15 @@ def _pick_best_pdf(row):
     return None
 
 
-def _compute_relevance_mask(df: pd.DataFrame) -> pd.Series:
-    if not REQUIRE_TARGET_IN_TITLE_ABSTRACT or df.empty:
+def _compute_relevance_mask(
+    df: pd.DataFrame,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> pd.Series:
+    resolved_ctx = ctx or config.default_metal_context()
+    if not resolved_ctx.settings.require_target_in_title_abstract or df.empty:
         return pd.Series(True, index=df.index)
-    pat = build_target_regex()
+    pat = resolved_ctx.target_regex
     titles = df.get("title", pd.Series("", index=df.index))
     abstracts = df.get("abstract", pd.Series("", index=df.index))
     return pd.Series(
@@ -112,21 +125,26 @@ def _compute_relevance_mask(df: pd.DataFrame) -> pd.Series:
     )
 
 
-def run_find_pdfs(append: bool | None = None):
-    if append is None:
-        append = os.environ.get("TAFEL_APPEND") == "1"
+def run_find_pdfs(
+    append: bool = False,
+    *,
+    ctx: config.MetalRunContext | None = None,
+):
+    ctx = ctx or config.default_metal_context()
+    ctx.ensure_dirs()
+    settings = ctx.settings
 
-    df = pd.read_csv(STEP1_OUTPUT)
-    print(f"Loaded {len(df)} papers from {STEP1_OUTPUT}")
+    df = pd.read_csv(ctx.step1_output)
+    print(f"Loaded {len(df)} papers from {ctx.step1_output}")
 
     prev_unpaywall: dict[str, dict] = {}
     prev_s2_pdf: dict[str, str] = {}
     prev_seen_dois: set[str] = set()
-    if append and os.path.exists(STEP2_OUTPUT):
+    if append and os.path.exists(ctx.step2_output):
         try:
-            prev_df = pd.read_csv(STEP2_OUTPUT)
+            prev_df = pd.read_csv(ctx.step2_output)
             # 先以舊 Step 2 清單鎖定既有下載狀態，避免覆寫後 Step 3 把本次新增論文誤標為 failed_legacy
-            _bootstrap_state_from_prev_step2(prev_df)
+            _bootstrap_state_from_prev_step2(prev_df, ctx=ctx)
             has_checked_col = "step2_checked" in prev_df.columns
             for _, prow in prev_df.iterrows():
                 dk = normalize_doi_key(prow.get("doi"))
@@ -179,7 +197,7 @@ def run_find_pdfs(append: bool | None = None):
         else None
     )
 
-    relevant_mask = _compute_relevance_mask(df)
+    relevant_mask = _compute_relevance_mask(df, ctx=ctx)
     skipped_irrel = int((~relevant_mask).sum())
     if skipped_irrel:
         print(
@@ -188,7 +206,7 @@ def run_find_pdfs(append: bool | None = None):
         )
 
     # 1. 優先執行極快的 Semantic Scholar Batch API（200 DOI/次），先補齊無 PDF URL 者
-    if ENABLE_SEMANTIC_SCHOLAR and not df.empty:
+    if settings.enable_semantic_scholar and not df.empty:
         def _needs_s2_lookup(idx_row) -> bool:
             idx, row = idx_row
             if not bool(relevant_mask.loc[idx]):
@@ -211,7 +229,7 @@ def run_find_pdfs(append: bool | None = None):
         if missing_dois:
             from semantic_scholar_fetcher import batch_lookup_pdf_urls
 
-            s2_map = batch_lookup_pdf_urls(missing_dois)
+            s2_map = batch_lookup_pdf_urls(missing_dois, ctx=ctx)
             if s2_map:
                 def _lookup_s2_pdf(doi_val):
                     dk = normalize_doi_key(doi_val)
@@ -244,7 +262,7 @@ def run_find_pdfs(append: bool | None = None):
             skipped_pmcid += 1
             df.at[idx, "step2_checked"] = True
             continue
-        if STEP2_SKIP_UNPAYWALL_IF_HAS_PDF and any(
+        if settings.step2_skip_unpaywall_if_has_pdf and any(
             _has_http_url(row.get(c)) for c in ("s2_pdf_url", "best_pdf_url", "primary_pdf_url")
         ):
             skipped_has_pdf += 1
@@ -258,11 +276,16 @@ def run_find_pdfs(append: bool | None = None):
             f"已有 Europe PMC PMCID: {skipped_pmcid} 篇 | 實際待查: {len(unpaywall_indices)} 篇"
         )
 
-    checkpoint_every = max(0, int(STEP2_CHECKPOINT_EVERY))
+    checkpoint_every = max(0, int(settings.step2_checkpoint_every))
     try:
         for idx in tqdm(unpaywall_indices, total=len(unpaywall_indices), desc="Unpaywall lookup"):
             doi = df.at[idx, "doi"]
-            info = find_pdf_url(doi)
+            info = find_pdf_url(
+                doi,
+                mailto=settings.mailto,
+                timeout=settings.request_timeout,
+                ctx=ctx,
+            )
             for col in _UNPAYWALL_COLS:
                 if col in info:
                     df.at[idx, col] = info.get(col)
@@ -271,13 +294,13 @@ def run_find_pdfs(append: bool | None = None):
 
             if checkpoint_every > 0 and queried_new % checkpoint_every == 0:
                 df["final_pdf_url"] = df.apply(_pick_best_pdf, axis=1)
-                save_csv_atomic(df, STEP2_OUTPUT)
+                save_csv_atomic(df, ctx.step2_output)
 
-            if STEP2_UNPAYWALL_DELAY > 0:
-                time.sleep(STEP2_UNPAYWALL_DELAY)
+            if settings.step2_unpaywall_delay > 0:
+                time.sleep(settings.step2_unpaywall_delay)
     finally:
         df["final_pdf_url"] = df.apply(_pick_best_pdf, axis=1)
-        save_csv_atomic(df, STEP2_OUTPUT)
+        save_csv_atomic(df, ctx.step2_output)
 
     n_pdf = int(df["final_pdf_url"].notna().sum())
     n_pmcid = (
@@ -289,9 +312,14 @@ def run_find_pdfs(append: bool | None = None):
         f"Papers with PDF URL: {n_pdf} / {len(df)} | With Europe PMC PMCID: {n_pmcid} "
         f"| Unpaywall queried: {queried_new}"
     )
-    print(f"✅ Saved to {STEP2_OUTPUT}")
+    print(f"✅ Saved to {ctx.step2_output}")
     return df
 
 
 if __name__ == "__main__":
-    run_find_pdfs()
+    _cli_ctx = config.default_metal_context()
+    _cli_ctx.print_summary()
+    run_find_pdfs(
+        append=(os.environ.get("TAFEL_APPEND") == "1"),
+        ctx=_cli_ctx,
+    )

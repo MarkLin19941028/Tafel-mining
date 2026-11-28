@@ -14,21 +14,7 @@ import xml.etree.ElementTree as ET
 import requests
 from tqdm import tqdm
 
-from config import (
-    EUROPEPMC_DELAY,
-    EUROPEPMC_MAX_PAPERS,
-    FROM_YEAR,
-    METAL_SYMBOL,
-    REQUEST_TIMEOUT,
-    REQUIRE_TARGET_IN_TITLE_ABSTRACT,
-    SEARCH_MODES,
-    STEP1_EARLY_STOP_EMPTY_PAGES,
-    STEP1_MAX_SCAN_MULTIPLIER,
-    TARGET_METAL,
-    TEXT_DIR,
-    build_target_regex,
-    parse_search_modes,
-)
+import config
 from record_keys import make_record_key
 
 EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -76,17 +62,48 @@ def build_europepmc_query(
     target_metal: str | None = None,
     metal_symbol: str | None = None,
     from_year: int | None = None,
+    *,
+    compounds: list[str] | tuple[str, ...] | None = None,
+    ctx: config.MetalRunContext | None = None,
 ) -> str:
-    """依選取的搜尋模式組合組裝 Europe PMC 布林查詢字串。"""
-    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
-    t_metal = target_metal or TARGET_METAL
-    m_sym = metal_symbol or METAL_SYMBOL
-    f_year = FROM_YEAR if from_year is None else from_year
+    """依選取的搜尋模式組合組裝 Europe PMC 布林查詢字串（含化合物與易混淆符號消歧）。"""
+    resolved_ctx = ctx
+    if resolved_ctx is None and (
+        modes is None or target_metal is None or metal_symbol is None or from_year is None
+    ):
+        resolved_ctx = config.default_metal_context()
+
+    active_modes = (
+        list(resolved_ctx.search_modes)
+        if modes is None
+        else config.parse_search_modes(modes)
+    )
+    t_metal = target_metal or resolved_ctx.target_metal
+    m_sym = metal_symbol or resolved_ctx.metal_symbol
+    f_year = resolved_ctx.settings.from_year if from_year is None else from_year
+    raw_compounds = (
+        compounds
+        if compounds is not None
+        else (resolved_ctx.compounds if resolved_ctx is not None else ())
+    )
+
+    metal_clause = config.build_metal_search_clause(t_metal, m_sym, syntax="boolean")
+    skip_terms = {t_metal.lower(), m_sym.lower()}
+    extra_compounds = [
+        c.strip()
+        for c in raw_compounds
+        if c and c.strip().lower() not in skip_terms and '"' not in c
+    ]
+    if extra_compounds:
+        comp_or = " OR ".join(f'"{c}"' for c in extra_compounds)
+        subject_clause = f"({metal_clause} OR {comp_or})"
+    else:
+        subject_clause = metal_clause
 
     clauses = [_EPMC_MODE_CLAUSES[m] for m in active_modes]
     topic_clause = clauses[0] if len(clauses) == 1 else f"({' OR '.join(clauses)})"
     return (
-        f'("{t_metal}" OR "{m_sym}") '
+        f"{subject_clause} "
         f"AND {topic_clause} "
         f"AND OPEN_ACCESS:y AND PUB_YEAR:[{f_year} TO 2100]"
     )
@@ -121,12 +138,20 @@ def parse_jats_xml(xml_text: str) -> tuple[str, list[list[list[str]]]]:
     except ET.ParseError:
         return "", []
 
-    # 1. 擷取純文字（排除 ref-list 與 table-wrap 避免表格雜亂重複進正文）
+    # 1. 擷取純文字（排除 ref-list 與 table-wrap 避免表格雜亂重複進正文；保留 fig 內的 caption/title）
     text_parts: list[str] = []
 
     def walk_text(node: ET.Element) -> None:
         tag = _local_tag(node.tag)
-        if tag in ("ref-list", "back", "table-wrap", "fig"):
+        if tag in ("ref-list", "back", "table-wrap"):
+            return
+        if tag == "fig":
+            for child in node:
+                ctag = _local_tag(child.tag)
+                if ctag in ("label", "caption", "title"):
+                    t = _elem_text(child)
+                    if t:
+                        text_parts.append(t)
             return
         if tag in ("article-title", "title", "p"):
             t = _elem_text(node)
@@ -174,14 +199,15 @@ def _epmc_get_with_retry(
     url: str,
     *,
     params: dict | None = None,
-    timeout: int = REQUEST_TIMEOUT,
+    timeout: int | None = None,
     max_retries: int = 3,
 ) -> requests.Response | None:
     """具備 429 / 5xx / 網路瞬斷退避重試的 Europe PMC GET 請求。"""
+    effective_timeout = timeout if timeout is not None else config.load_settings().request_timeout
     for attempt in range(max_retries):
         try:
             getter = _get_epmc_session().get if requests.get is _ORIG_REQUESTS_GET else requests.get
-            resp = getter(url, params=params, timeout=timeout)
+            resp = getter(url, params=params, timeout=effective_timeout)
             status = getattr(resp, "status_code", None)
             if isinstance(status, int):
                 if status == 429:
@@ -202,11 +228,12 @@ def _epmc_get_with_retry(
     return None
 
 
-def lookup_pmcid_by_doi(doi: str) -> str | None:
+def lookup_pmcid_by_doi(doi: str, *, timeout: int | None = None) -> str | None:
     """依 DOI 查詢 Europe PMC 是否有開放全文（OPEN_ACCESS:y），有則回傳 PMCID。"""
     doi_clean = str(doi).replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
     if not doi_clean:
         return None
+    effective_timeout = timeout if timeout is not None else config.load_settings().request_timeout
     try:
         resp = _epmc_get_with_retry(
             EPMC_SEARCH_URL,
@@ -216,7 +243,7 @@ def lookup_pmcid_by_doi(doi: str) -> str | None:
                 "resultType": "lite",
                 "pageSize": 1,
             },
-            timeout=REQUEST_TIMEOUT,
+            timeout=effective_timeout,
         )
         if resp is None or resp.status_code != 200:
             return None
@@ -228,14 +255,17 @@ def lookup_pmcid_by_doi(doi: str) -> str | None:
     return None
 
 
-def fetch_fulltext_xml(pmcid: str) -> str | None:
+def fetch_fulltext_xml(pmcid: str, *, timeout: int | None = None) -> str | None:
     """下載指定 PMCID 的完整 JATS XML。"""
     if not pmcid:
         return None
+    effective_timeout = (
+        timeout if timeout is not None else config.load_settings().request_timeout * 2
+    )
     try:
         resp = _epmc_get_with_retry(
             EPMC_XML_URL.format(pmcid=pmcid),
-            timeout=REQUEST_TIMEOUT * 2,
+            timeout=effective_timeout,
         )
         if resp is not None and resp.status_code == 200 and "<article" in resp.text[:500]:
             return resp.text
@@ -247,7 +277,9 @@ def fetch_fulltext_xml(pmcid: str) -> str | None:
 def save_xml_to_texts(
     xml_text: str,
     base_name: str,
-    text_dir: str = TEXT_DIR,
+    text_dir: str | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> tuple[bool, bool, int]:
     """
     將解析後的文字與表格寫入 text_dir：
@@ -255,13 +287,14 @@ def save_xml_to_texts(
     - 若 .txt 已存在：保留原 PDF .txt（wrote_txt=False），但若 XML 有結構化表格則更新 _tables.json（upgraded_tables=True）
     回傳 (wrote_txt, upgraded_tables, num_tables)
     """
-    os.makedirs(text_dir, exist_ok=True)
+    resolved_text_dir = text_dir or (ctx or config.default_metal_context()).text_dir
+    os.makedirs(resolved_text_dir, exist_ok=True)
     plain_text, tables = parse_jats_xml(xml_text)
     if not plain_text and not tables:
         return False, False, 0
 
-    text_path = os.path.join(text_dir, base_name + ".txt")
-    table_path = os.path.join(text_dir, base_name + "_tables.json")
+    text_path = os.path.join(resolved_text_dir, base_name + ".txt")
+    table_path = os.path.join(resolved_text_dir, base_name + "_tables.json")
 
     wrote_txt = False
     if not os.path.exists(text_path) and plain_text:
@@ -281,16 +314,22 @@ def save_xml_to_texts(
 def try_fallback_from_europepmc(
     doi: str,
     base_name: str,
-    text_dir: str = TEXT_DIR,
+    text_dir: str | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> tuple[bool, int]:
     """Step 3 下載 PDF 失敗時的備援：透過 DOI 嘗試抓取 Europe PMC 開放全文 XML。"""
-    pmcid = lookup_pmcid_by_doi(doi)
+    settings = ctx.settings if ctx is not None else config.load_settings()
+    resolved_text_dir = text_dir or (ctx or config.default_metal_context()).text_dir
+    pmcid = lookup_pmcid_by_doi(doi, timeout=settings.request_timeout)
     if not pmcid:
         return False, 0
-    xml_text = fetch_fulltext_xml(pmcid)
+    xml_text = fetch_fulltext_xml(pmcid, timeout=settings.request_timeout * 2)
     if not xml_text:
         return False, 0
-    wrote_txt, upgraded_tables, n_tables = save_xml_to_texts(xml_text, base_name, text_dir)
+    wrote_txt, upgraded_tables, n_tables = save_xml_to_texts(
+        xml_text, base_name, resolved_text_dir
+    )
     return (wrote_txt or upgraded_tables), n_tables
 
 
@@ -303,6 +342,8 @@ def search_europepmc_metadata(
     early_stop_empty_pages: int | None = None,
     start_cursor: str = "*",
     cursor_out: dict | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict]:
     """
     查詢 Europe PMC 開放取用文獻 metadata（供 Step 1 與 OpenAlex / Semantic Scholar 統一去重）。
@@ -310,22 +351,41 @@ def search_europepmc_metadata(
     支援傳入 known_keys / needs_backfill 進行搜尋過程即時去重與 PMCID 回補，
     以及 start_cursor / cursor_out 支援跨次接續翻頁與耗盡偵測。
     """
-    limit = EUROPEPMC_MAX_PAPERS if max_papers is None else max_papers
+    resolved_ctx = ctx or config.default_metal_context()
+    settings = resolved_ctx.settings
+
+    limit = settings.europepmc_max_papers if max_papers is None else max_papers
     if limit <= 0:
         return []
 
-    scan_mult = max(1, int(STEP1_MAX_SCAN_MULTIPLIER if max_scan_multiplier is None else max_scan_multiplier))
-    early_stop = max(0, int(STEP1_EARLY_STOP_EMPTY_PAGES if early_stop_empty_pages is None else early_stop_empty_pages))
+    scan_mult = max(
+        1,
+        int(settings.step1_max_scan_multiplier if max_scan_multiplier is None else max_scan_multiplier),
+    )
+    early_stop = max(
+        0,
+        int(
+            settings.step1_early_stop_empty_pages
+            if early_stop_empty_pages is None
+            else early_stop_empty_pages
+        ),
+    )
     inflight = known_keys is not None
     max_pages = max(1, math.ceil(limit / 100) * scan_mult)
 
-    active_modes = SEARCH_MODES if modes is None else parse_search_modes(modes)
-    query = build_europepmc_query(modes=active_modes)
+    active_modes = (
+        list(resolved_ctx.search_modes)
+        if modes is None
+        else config.parse_search_modes(modes)
+    )
+    query = build_europepmc_query(modes=active_modes, ctx=resolved_ctx)
     resume_note = " [續頁]" if (start_cursor and start_cursor != "*") else ""
     print(f"\n[Europe PMC] Searching open-access papers{resume_note} (modes={','.join(active_modes)}, limit={limit})...")
     print(f"  Query: {query}")
 
-    target_pat = build_target_regex() if REQUIRE_TARGET_IN_TITLE_ABSTRACT else None
+    target_pat = (
+        resolved_ctx.target_regex if settings.require_target_in_title_abstract else None
+    )
 
     records: list[dict] = []
     seen_pmcids: set[str] = set()
@@ -351,7 +411,7 @@ def search_europepmc_metadata(
                         "pageSize": page_size,
                         "cursorMark": cursor_mark,
                     },
-                    timeout=REQUEST_TIMEOUT,
+                    timeout=settings.request_timeout,
                 )
                 if resp is None:
                     print("  ⚠️ Europe PMC search failed after retries.")
@@ -460,7 +520,7 @@ def search_europepmc_metadata(
             if not next_cursor or next_cursor == cursor_mark:
                 break
             cursor_mark = next_cursor
-            time.sleep(EUROPEPMC_DELAY)
+            time.sleep(settings.europepmc_delay)
     finally:
         if cursor_out is not None:
             cursor_out["next_cursor"] = None if exhausted else next_cursor_to_save
@@ -479,13 +539,19 @@ def search_europepmc_metadata(
 
 def run_europepmc_search(
     max_papers: int | None = None,
-    text_dir: str = TEXT_DIR,
+    text_dir: str | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> dict:
     """
     主動向 Europe PMC 搜尋目標金屬的開放腐蝕全文 XML，
     解析並寫入 data/<METAL>/texts/（含去重與 XML 表格升級）。
     """
-    candidates = search_europepmc_metadata(max_papers=max_papers)
+    resolved_ctx = ctx or config.default_metal_context()
+    settings = resolved_ctx.settings
+    resolved_text_dir = text_dir or resolved_ctx.text_dir
+
+    candidates = search_europepmc_metadata(max_papers=max_papers, ctx=resolved_ctx)
     if not candidates:
         return {"new_txt": 0, "upgraded_tables": 0, "skipped": 0, "failed": 0}
 
@@ -498,20 +564,20 @@ def run_europepmc_search(
     for item in tqdm(candidates, desc="Fetching Europe PMC XML"):
         pmcid = item["pmcid"]
         base_name = sanitize_base_name(item["doi"] or pmcid)
-        text_path = os.path.join(text_dir, base_name + ".txt")
-        epmc_marker = os.path.join(text_dir, base_name + ".epmc_done")
+        text_path = os.path.join(resolved_text_dir, base_name + ".txt")
+        epmc_marker = os.path.join(resolved_text_dir, base_name + ".epmc_done")
 
         if os.path.exists(epmc_marker) and os.path.exists(text_path):
             skipped += 1
             continue
 
-        xml_text = fetch_fulltext_xml(pmcid)
+        xml_text = fetch_fulltext_xml(pmcid, timeout=settings.request_timeout * 2)
         if not xml_text:
             failed += 1
-            time.sleep(EUROPEPMC_DELAY)
+            time.sleep(settings.europepmc_delay)
             continue
 
-        w_txt, u_tbl, n_tbl = save_xml_to_texts(xml_text, base_name, text_dir)
+        w_txt, u_tbl, n_tbl = save_xml_to_texts(xml_text, base_name, resolved_text_dir)
         total_tables += n_tbl
         if w_txt:
             new_txt += 1
@@ -527,7 +593,7 @@ def run_europepmc_search(
         except OSError:
             pass
 
-        time.sleep(EUROPEPMC_DELAY)
+        time.sleep(settings.europepmc_delay)
 
     print(
         f"  ✅ Europe PMC 完成 — 新增全文: {new_txt}, 升級 XML 表格: {upgraded_tables}, "
@@ -543,4 +609,6 @@ def run_europepmc_search(
 
 
 if __name__ == "__main__":
-    run_europepmc_search()
+    _cli_ctx = config.default_metal_context()
+    _cli_ctx.print_summary()
+    run_europepmc_search(ctx=_cli_ctx)

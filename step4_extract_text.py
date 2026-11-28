@@ -57,7 +57,7 @@ def extract_tables_with_timeout(
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_file:
         tmp_path = tmp_file.name
 
-    child_env = {**os.environ, "TAFEL_QUIET_CONFIG": "1"}
+    child_env = os.environ.copy()
     cmd = [
         sys.executable,
         os.path.abspath(__file__),
@@ -103,13 +103,19 @@ def run_extract(
     pdf_dir: str | None = None,
     text_dir: str | None = None,
     table_timeout_sec: float | None = None,
+    *,
+    ctx=None,
 ) -> None:
     """批次從 PDF 目錄抽取純文字與表格至文字目錄。"""
-    if pdf_dir is None or text_dir is None:
-        from config import PDF_DIR as _cfg_pdf_dir, TEXT_DIR as _cfg_text_dir
+    if ctx is not None:
+        pdf_dir = pdf_dir or ctx.pdf_dir
+        text_dir = text_dir or ctx.text_dir
+    elif pdf_dir is None or text_dir is None:
+        import config
 
-        pdf_dir = pdf_dir or _cfg_pdf_dir
-        text_dir = text_dir or _cfg_text_dir
+        default_ctx = config.default_metal_context()
+        pdf_dir = pdf_dir or default_ctx.pdf_dir
+        text_dir = text_dir or default_ctx.text_dir
 
     effective_timeout = TABLE_EXTRACT_TIMEOUT_SEC if table_timeout_sec is None else table_timeout_sec
     os.makedirs(text_dir, exist_ok=True)
@@ -166,4 +172,8 @@ def _run_table_worker(pdf_path: str, out_json_path: str) -> int:
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--_table-worker":
         sys.exit(_run_table_worker(sys.argv[2], sys.argv[3]))
-    run_extract()
+    import config
+
+    _cli_ctx = config.default_metal_context()
+    _cli_ctx.print_summary()
+    run_extract(ctx=_cli_ctx)

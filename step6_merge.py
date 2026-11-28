@@ -10,14 +10,7 @@ from pathlib import Path
 import ast
 import json
 
-# 優先從 config 讀取 SIMULATOR_DATA_DIR，讓路徑集中管理
-try:
-    from config import SIMULATOR_DATA_DIR as _CFG_SIM_DIR
-    SIMULATOR_DATA_DIR = Path(_CFG_SIM_DIR)
-except ImportError:
-    # fallback：與 Tafel mining 同層的 corrosion_simulator/data/
-    SIMULATOR_DATA_DIR = Path(__file__).parent.parent / "corrosion_simulator" / "data"
-
+import config
 from step5_constants import KNOWN_MATERIALS
 from step5_table_builders import (
     build_electrochemical_database,
@@ -31,22 +24,8 @@ from step5_text_extractor import (
     generate_solution_id,
     lookup_species_category,
 )
-import step5_table_builders
 
-MINING_DATA_DIR = Path(__file__).parent / "data"
-
-# ============================================================
-#  修復 1：SIMULATOR_DATA_DIR 路徑驗證
-# ============================================================
-# 若目錄的父層不存在，代表 corrosion_simulator 專案尚未建立，
-# 給出明確的錯誤訊息而不是靜默建立錯誤路徑。
-if not SIMULATOR_DATA_DIR.parent.exists():
-    print(f"⚠️  WARNING: corrosion_simulator directory not found at:")
-    print(f"   {SIMULATOR_DATA_DIR.parent}")
-    print(f"   Will create output at: {SIMULATOR_DATA_DIR}")
-    print(f"   If this is wrong, edit SIMULATOR_DATA_DIR in user_settings.py")
-
-os.makedirs(SIMULATOR_DATA_DIR, exist_ok=True)
+DEFAULT_MINING_DATA_DIR = Path(__file__).parent / "data"
 
 # ============================================================
 #  修復 3：自動偵測時檢查三個 CSV 是否齊全
@@ -56,6 +35,7 @@ REQUIRED_SUFFIXES = [
     "solution_properties.csv",
     "electrochemical_database.csv",
 ]
+
 
 def _metal_is_complete(metal_dir: Path) -> bool:
     """只有三個 CSV 都存在才算完整，避免引入殘缺資料。"""
@@ -73,16 +53,29 @@ def _metal_is_complete(metal_dir: Path) -> bool:
         return False
     return True
 
-METALS_TO_MERGE = sorted([
-    d.name for d in MINING_DATA_DIR.iterdir()
-    if d.is_dir() and _metal_is_complete(d)
-])
+
+def discover_complete_metals(mining_data_dir: Path | None = None) -> list[str]:
+    """掃描 data 目錄下具備完整 Step 5 三表輸出的金屬清單。"""
+    root = mining_data_dir or DEFAULT_MINING_DATA_DIR
+    if not root.is_dir():
+        return []
+    return sorted(
+        d.name for d in root.iterdir()
+        if d.is_dir() and _metal_is_complete(d)
+    )
+
 
 # ============================================================
 #  合併邏輯
 # ============================================================
 
-def merge_csvs(filename: str, id_col: str = None) -> pd.DataFrame:
+def merge_csvs(
+    filename: str,
+    id_col: str | None = None,
+    *,
+    metals: list[str] | tuple[str, ...] | None = None,
+    mining_data_dir: Path | None = None,
+) -> pd.DataFrame:
     """
     合併所有金屬的同名 CSV。
 
@@ -90,10 +83,12 @@ def merge_csvs(filename: str, id_col: str = None) -> pd.DataFrame:
         filename: 檔名後綴，例如 "material_properties.csv"
         id_col:   若指定，則於跨金屬層面依該欄位做全域去重
     """
+    data_dir = mining_data_dir or DEFAULT_MINING_DATA_DIR
+    metal_list = list(metals) if metals is not None else discover_complete_metals(data_dir)
     frames = []
 
-    for metal in METALS_TO_MERGE:
-        extracted_dir = MINING_DATA_DIR / metal / "extracted"
+    for metal in metal_list:
+        extracted_dir = data_dir / metal / "extracted"
         prefix = metal.lower()
         target_file = extracted_dir / f"{prefix}_{filename}"
 
@@ -228,9 +223,15 @@ def write_quality_report(
     sol_df: pd.DataFrame,
     echem_df: pd.DataFrame,
     output_dir: Path,
+    *,
+    metals: list[str] | tuple[str, ...] | None = None,
+    mining_data_dir: Path | None = None,
 ) -> Path:
     """產出 data/merged/quality_report.md，彙整欄位覆蓋率、數值分佈與過濾離群值摘要。"""
     from datetime import datetime
+
+    data_dir = mining_data_dir or DEFAULT_MINING_DATA_DIR
+    metal_list = list(metals) if metals is not None else discover_complete_metals(data_dir)
 
     lines = [
         "# Tafel Mining 資料品質報告",
@@ -241,7 +242,7 @@ def write_quality_report(
         "",
         "| 項目 | 數量 |",
         "|---|---|",
-        f"| 合併金屬數 | {len(METALS_TO_MERGE)} ({', '.join(METALS_TO_MERGE)}) |",
+        f"| 合併金屬數 | {len(metal_list)} ({', '.join(metal_list)}) |",
         f"| 材料表 (`material_properties.csv`) | {len(mat_df)} |",
         f"| 溶液表 (`solution_properties.csv`) | {len(sol_df)} |",
         f"| 電化學主表 (`electrochemical_database.csv`) | {len(echem_df)} |",
@@ -298,8 +299,8 @@ def write_quality_report(
 
     # 彙整各金屬被過濾的離群值清單
     outlier_frames = []
-    for metal in METALS_TO_MERGE:
-        of = MINING_DATA_DIR / metal / "extracted" / f"{metal.lower()}_filtered_outliers.csv"
+    for metal in metal_list:
+        of = data_dir / metal / "extracted" / f"{metal.lower()}_filtered_outliers.csv"
         if of.exists():
             try:
                 odf = pd.read_csv(of)
@@ -354,57 +355,74 @@ def build_full_material_properties(echem_df: pd.DataFrame) -> pd.DataFrame:
 def harvest_cross_metal_and_raw_records(
     echem_primary: pd.DataFrame,
     sol_primary: pd.DataFrame,
+    *,
+    metals: list[str] | tuple[str, ...] | None = None,
+    mining_data_dir: Path | None = None,
+    simulator_data_dir: Path | None = None,
+    settings: config.PipelineSettings | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     從各金屬的 *_raw_records.csv 與 data/merged/raw/ 歷史資料表回收所有屬於
     KNOWN_MATERIALS（11 種專案目標材料）的合格腐蝕記錄與溶液，並以嚴格品管規則過濾與去重。
     """
-    orig_keep = step5_table_builders.KEEP_ONLY_TARGET_METAL
-    step5_table_builders.KEEP_ONLY_TARGET_METAL = False
-    try:
-        all_recs: list[dict] = []
-        for metal in METALS_TO_MERGE:
-            raw_path = MINING_DATA_DIR / metal / "extracted" / f"{metal.lower()}_raw_records.csv"
-            if not raw_path.exists():
-                continue
-            try:
-                df_r = pd.read_csv(raw_path)
-            except pd.errors.EmptyDataError:
-                continue
-            for _, row in df_r.iterrows():
-                rec = row.to_dict()
-                for k, v in list(rec.items()):
-                    if pd.isna(v):
-                        rec[k] = None
-                if isinstance(rec.get("record_electrolytes"), str):
-                    try:
-                        rec["record_electrolytes"] = ast.literal_eval(rec["record_electrolytes"])
-                    except Exception:
-                        rec["record_electrolytes"] = None
-                if rec.get("material_id_assigned") in KNOWN_MATERIALS:
-                    rec["is_target_metal"] = True
-                    rec["_source_metal"] = metal
-                    all_recs.append(rec)
+    resolved_settings = settings or config.load_settings()
+    data_dir = mining_data_dir or resolved_settings.data_root
+    sim_dir = simulator_data_dir or resolved_settings.simulator_data_dir
+    metal_list = list(metals) if metals is not None else discover_complete_metals(data_dir)
 
-        sol_from_raw_rec = build_solution_properties(all_recs) if all_recs else pd.DataFrame()
-        if not sol_from_raw_rec.empty:
-            sol_from_raw_rec["is_target_metal"] = True
-            sol_from_raw_rec["_source_metal"] = "cross_metal"
-        echem_from_raw_rec = (
-            build_electrochemical_database(all_recs, sol_from_raw_rec)
-            if all_recs
-            else pd.DataFrame()
+    all_recs: list[dict] = []
+    for metal in metal_list:
+        raw_path = data_dir / metal / "extracted" / f"{metal.lower()}_raw_records.csv"
+        if not raw_path.exists():
+            continue
+        try:
+            df_r = pd.read_csv(raw_path)
+        except pd.errors.EmptyDataError:
+            continue
+        for _, row in df_r.iterrows():
+            rec = row.to_dict()
+            for k, v in list(rec.items()):
+                if pd.isna(v):
+                    rec[k] = None
+            if isinstance(rec.get("record_electrolytes"), str):
+                try:
+                    rec["record_electrolytes"] = ast.literal_eval(rec["record_electrolytes"])
+                except Exception:
+                    rec["record_electrolytes"] = None
+            if rec.get("material_id_assigned") in KNOWN_MATERIALS:
+                rec["is_target_metal"] = True
+                rec["_source_metal"] = metal
+                all_recs.append(rec)
+
+    sol_from_raw_rec = (
+        build_solution_properties(all_recs, keep_only_target=False, target_symbol="")
+        if all_recs
+        else pd.DataFrame()
+    )
+    if not sol_from_raw_rec.empty:
+        sol_from_raw_rec["is_target_metal"] = True
+        sol_from_raw_rec["_source_metal"] = "cross_metal"
+    echem_from_raw_rec = (
+        build_electrochemical_database(
+            all_recs,
+            sol_from_raw_rec,
+            keep_only_target=False,
+            target_symbol="",
         )
-        if not echem_from_raw_rec.empty:
-            echem_from_raw_rec["is_target_metal"] = True
-            src_to_m = {r["source_id"]: r["_source_metal"] for r in all_recs}
-            echem_from_raw_rec["_source_metal"] = echem_from_raw_rec["source_reference"].map(src_to_m)
-            echem_from_raw_rec, _ = filter_echem_outliers(echem_from_raw_rec)
-    finally:
-        step5_table_builders.KEEP_ONLY_TARGET_METAL = orig_keep
+        if all_recs
+        else pd.DataFrame()
+    )
+    if not echem_from_raw_rec.empty:
+        echem_from_raw_rec["is_target_metal"] = True
+        src_to_m = {r["source_id"]: r["_source_metal"] for r in all_recs}
+        echem_from_raw_rec["_source_metal"] = echem_from_raw_rec["source_reference"].map(src_to_m)
+        echem_from_raw_rec, _ = filter_echem_outliers(
+            echem_from_raw_rec,
+            settings=resolved_settings,
+        )
 
     # 整合 data/merged/raw/ 下的歷史結構化表格與溶液（若存在）
-    raw_dir = SIMULATOR_DATA_DIR / "raw"
+    raw_dir = sim_dir / "raw"
     raw_ml_path = raw_dir / "ml_training_dataset.csv"
     raw_sol_path = raw_dir / "solution_properties.csv"
 
@@ -464,7 +482,10 @@ def harvest_cross_metal_and_raw_records(
             classify_material_class(m, s)
             for m, s in zip(df_raw["material_id"], df_raw["sample_name"])
         ]
-        df_raw["_outlier"] = [check_outlier_reason(r) for _, r in df_raw.iterrows()]
+        df_raw["_outlier"] = [
+            check_outlier_reason(r, settings=resolved_settings)
+            for _, r in df_raw.iterrows()
+        ]
         df_raw["_has_corr"] = (
             (df_raw["Ecorr_V_original"].notna() | df_raw["icorr_uA_cm2"].notna())
             & ~(df_raw["icorr_uA_cm2"].notna() & (df_raw["icorr_uA_cm2"] <= 0))
@@ -559,37 +580,68 @@ def harvest_cross_metal_and_raw_records(
     return combined_echem, combined_sol
 
 
-def run_merge():
-    if not METALS_TO_MERGE:
+def run_merge(
+    settings: config.PipelineSettings | None = None,
+    *,
+    mining_data_dir: Path | None = None,
+):
+    resolved_settings = settings or config.load_settings()
+    data_dir = mining_data_dir or resolved_settings.data_root
+    sim_dir = resolved_settings.simulator_data_dir
+
+    if not sim_dir.parent.exists():
+        print("⚠️  WARNING: corrosion_simulator directory not found at:")
+        print(f"   {sim_dir.parent}")
+        print(f"   Will create output at: {sim_dir}")
+        print("   If this is wrong, edit SIMULATOR_DATA_DIR in user_settings.py")
+
+    os.makedirs(sim_dir, exist_ok=True)
+    metals = discover_complete_metals(data_dir)
+    if not metals:
         print("❌ No complete metal datasets found in data/. "
               "Run step1-5 for at least one metal first.")
         sys.exit(1)
 
-    print(f"Found complete metals: {METALS_TO_MERGE}")
-    print(f"Output dir: {SIMULATOR_DATA_DIR}\n")
+    print(f"Found complete metals: {metals}")
+    print(f"Output dir: {sim_dir}\n")
 
     # ---- 1. solution_properties & electrochemical_database (含跨金屬與 raw 整合) ----
     print("--- Merging solution_properties & electrochemical_database ---")
-    sol_primary = merge_csvs("solution_properties.csv")
-    echem_primary = merge_csvs("electrochemical_database.csv")
+    sol_primary = merge_csvs(
+        "solution_properties.csv",
+        metals=metals,
+        mining_data_dir=data_dir,
+    )
+    echem_primary = merge_csvs(
+        "electrochemical_database.csv",
+        metals=metals,
+        mining_data_dir=data_dir,
+    )
 
-    echem_df, sol_df = harvest_cross_metal_and_raw_records(echem_primary, sol_primary)
+    echem_df, sol_df = harvest_cross_metal_and_raw_records(
+        echem_primary,
+        sol_primary,
+        metals=metals,
+        mining_data_dir=data_dir,
+        simulator_data_dir=sim_dir,
+        settings=resolved_settings,
+    )
 
     # record_id 跨金屬重新編號（原各自從 REC_00001 開始）
     echem_df["record_id"] = [f"REC_{i+1:05d}" for i in range(len(echem_df))]
 
-    sol_path = SIMULATOR_DATA_DIR / "solution_properties.csv"
+    sol_path = sim_dir / "solution_properties.csv"
     sol_df.to_csv(sol_path, index=False, encoding="utf-8-sig")
     print(f"  ✅ {len(sol_df)} solutions → {sol_path}\n")
 
-    echem_path = SIMULATOR_DATA_DIR / "electrochemical_database.csv"
+    echem_path = sim_dir / "electrochemical_database.csv"
     echem_df.to_csv(echem_path, index=False, encoding="utf-8-sig")
     print(f"  ✅ {len(echem_df)} records → {echem_path}\n")
 
     # ---- 2. material_properties (完整 11 種專案目標材料) ----
     print("--- Building complete material_properties ---")
     mat_df = build_full_material_properties(echem_df)
-    mat_path = SIMULATOR_DATA_DIR / "material_properties.csv"
+    mat_path = sim_dir / "material_properties.csv"
     mat_df.to_csv(mat_path, index=False, encoding="utf-8-sig")
     print(f"  ✅ {len(mat_df)} materials → {mat_path}\n")
 
@@ -597,13 +649,13 @@ def run_merge():
     print("=" * 55)
     print("  MERGE SUMMARY")
     print("=" * 55)
-    print(f"  Metals merged:    {len(METALS_TO_MERGE)}  ({', '.join(METALS_TO_MERGE)})")
+    print(f"  Metals merged:    {len(metals)}  ({', '.join(metals)})")
     print(f"  Materials:        {len(mat_df)}")
     print(f"  Solutions:        {len(sol_df)}")
     print(f"  Echem records:    {len(echem_df)}")
 
     if not echem_df.empty and "_source_metal" in echem_df.columns:
-        print(f"\n  Records per metal:")
+        print("\n  Records per metal:")
         print(echem_df["_source_metal"].value_counts().to_string())
 
     if not echem_df.empty:
@@ -614,7 +666,14 @@ def run_merge():
                 print(f"  {col}: {n} non-null ({pct:.1f}%)")
 
     print("=" * 55)
-    report_path = write_quality_report(mat_df, sol_df, echem_df, SIMULATOR_DATA_DIR)
+    report_path = write_quality_report(
+        mat_df,
+        sol_df,
+        echem_df,
+        sim_dir,
+        metals=metals,
+        mining_data_dir=data_dir,
+    )
     print(f"  📊 Quality report → {report_path}")
     return mat_df, sol_df, echem_df
 

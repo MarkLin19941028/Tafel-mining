@@ -1,0 +1,562 @@
+{
+  "role_fields": {
+    "oxidizer": "oxidizer_type",
+    "acid": "acid_type",
+    "chelating_agent": "chelating_agent_type",
+    "base": "base_type",
+    "electrolyte_additive": "electrolyte_additive",
+    "inhibitor": "inhibitor_type",
+    "organic_solvent": "organic_solvent_type"
+  },
+  "species": [
+    {
+      "canonical": "H2O2",
+      "role": "oxidizer",
+      "aliases": [
+        "H₂O₂",
+        "hydrogen peroxide"
+      ]
+    },
+    {
+      "canonical": "HNO3",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "O3",
+      "role": "oxidizer",
+      "match_in_electrolyte_regex": false
+    },
+    {
+      "canonical": "FeCl3",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "Fe(NO3)3",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "KIO4",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "KIO3",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "NaClO",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "K2S2O8",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "Na2S2O8",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "(NH4)2S2O8",
+      "role": "oxidizer"
+    },
+    {
+      "canonical": "HCl",
+      "role": "acid"
+    },
+    {
+      "canonical": "H2SO4",
+      "role": "acid",
+      "aliases": [
+        "H₂SO₄"
+      ]
+    },
+    {
+      "canonical": "HClO4",
+      "role": "acid"
+    },
+    {
+      "canonical": "H3PO4",
+      "role": "acid"
+    },
+    {
+      "canonical": "HF",
+      "role": "acid",
+      "aliases": [
+        "hydrofluoric acid"
+      ]
+    },
+    {
+      "canonical": "citric acid",
+      "role": "chelating_agent"
+    },
+    {
+      "canonical": "oxalic acid",
+      "role": "chelating_agent"
+    },
+    {
+      "canonical": "malic acid",
+      "role": "chelating_agent"
+    },
+    {
+      "canonical": "tartaric acid",
+      "role": "chelating_agent"
+    },
+    {
+      "canonical": "acetic acid",
+      "role": "acid"
+    },
+    {
+      "canonical": "KOH",
+      "role": "base"
+    },
+    {
+      "canonical": "NaOH",
+      "role": "base"
+    },
+    {
+      "canonical": "NH4OH",
+      "role": "base",
+      "aliases": [
+        "NH₄OH",
+        "ammonium hydroxide"
+      ]
+    },
+    {
+      "canonical": "TMAH",
+      "role": "base",
+      "aliases": [
+        "tetramethylammonium hydroxide"
+      ]
+    },
+    {
+      "canonical": "LiOH",
+      "role": "base"
+    },
+    {
+      "canonical": "NaCl",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "KCl",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "Na2SO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "K2SO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "NaHCO3",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "KHCO3",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "Na2CO3",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "K2CO3",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "NaClO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "KNO3",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "NaNO3",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "Na2HPO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "KH2PO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "K2HPO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "NaH2PO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "Na2B4O7",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "K3Fe(CN)6",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "K4Fe(CN)6",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "CuSO4",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "CuCl2",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "PBS",
+      "role": "electrolyte_additive",
+      "aliases": [
+        "phosphate buffer"
+      ]
+    },
+    {
+      "canonical": "borate buffer",
+      "role": "electrolyte_additive"
+    },
+    {
+      "canonical": "EDTA",
+      "role": "chelating_agent"
+    },
+    {
+      "canonical": "glycine",
+      "role": "chelating_agent"
+    },
+    {
+      "canonical": "BTA",
+      "role": "inhibitor",
+      "aliases": [
+        "benzotriazole"
+      ]
+    },
+    {
+      "canonical": "TTA",
+      "role": "inhibitor",
+      "aliases": [
+        "tolyltriazole"
+      ]
+    },
+    {
+      "canonical": "TAZ",
+      "role": "inhibitor",
+      "aliases": [
+        "1,2,4-triazole"
+      ]
+    },
+    {
+      "canonical": "ATA",
+      "role": "inhibitor",
+      "aliases": [
+        "3-amino-1,2,4-triazole"
+      ]
+    },
+    {
+      "canonical": "5-AT",
+      "role": "inhibitor",
+      "aliases": [
+        "5-aminotetrazole"
+      ]
+    },
+    {
+      "canonical": "aminotetrazole",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "MBI",
+      "role": "inhibitor",
+      "aliases": [
+        "2-mercaptobenzimidazole"
+      ]
+    },
+    {
+      "canonical": "MBT",
+      "role": "inhibitor",
+      "aliases": [
+        "2-mercaptobenzothiazole"
+      ]
+    },
+    {
+      "canonical": "MPT",
+      "role": "inhibitor",
+      "aliases": [
+        "5-mercapto-1-phenyl-1H-tetrazole",
+        "5-mercapto-1-phenyltetrazole"
+      ]
+    },
+    {
+      "canonical": "BIA",
+      "role": "inhibitor",
+      "aliases": [
+        "benzimidazole"
+      ]
+    },
+    {
+      "canonical": "imidazole",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "pyrazole",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "thiazole",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "1,3,4-thiadiazole",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "adenine",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "guanine",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "purine",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "8-HQ",
+      "role": "inhibitor",
+      "aliases": [
+        "8-hydroxyquinoline"
+      ]
+    },
+    {
+      "canonical": "pyridine",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "thiourea",
+      "role": "inhibitor",
+      "aliases": [
+        "TU"
+      ]
+    },
+    {
+      "canonical": "thiosemicarbazide",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "HMTA",
+      "role": "inhibitor",
+      "aliases": [
+        "urotropine",
+        "hexamethylenetetramine"
+      ]
+    },
+    {
+      "canonical": "MEA",
+      "role": "inhibitor",
+      "aliases": [
+        "monoethanolamine"
+      ]
+    },
+    {
+      "canonical": "cysteine",
+      "role": "inhibitor",
+      "aliases": [
+        "L-cysteine"
+      ]
+    },
+    {
+      "canonical": "methionine",
+      "role": "inhibitor",
+      "aliases": [
+        "L-methionine"
+      ]
+    },
+    {
+      "canonical": "histidine",
+      "role": "inhibitor",
+      "aliases": [
+        "L-histidine"
+      ]
+    },
+    {
+      "canonical": "tryptophan",
+      "role": "inhibitor",
+      "aliases": [
+        "L-tryptophan"
+      ]
+    },
+    {
+      "canonical": "glutamic acid",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "aspartic acid",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "alanine",
+      "role": "inhibitor",
+      "aliases": [
+        "L-alanine"
+      ]
+    },
+    {
+      "canonical": "arginine",
+      "role": "inhibitor",
+      "aliases": [
+        "L-arginine"
+      ]
+    },
+    {
+      "canonical": "lysine",
+      "role": "inhibitor",
+      "aliases": [
+        "L-lysine"
+      ]
+    },
+    {
+      "canonical": "SDS",
+      "role": "inhibitor",
+      "aliases": [
+        "sodium dodecyl sulfate"
+      ]
+    },
+    {
+      "canonical": "SDBS",
+      "role": "inhibitor",
+      "aliases": [
+        "sodium dodecylbenzenesulfonate"
+      ]
+    },
+    {
+      "canonical": "CTAB",
+      "role": "inhibitor",
+      "aliases": [
+        "cetyltrimethylammonium bromide"
+      ]
+    },
+    {
+      "canonical": "DTAB",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "Triton X-100",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "Tween-80",
+      "role": "inhibitor",
+      "aliases": [
+        "Tween 80"
+      ]
+    },
+    {
+      "canonical": "PEG",
+      "role": "inhibitor",
+      "aliases": [
+        "polyethylene glycol"
+      ]
+    },
+    {
+      "canonical": "PEI",
+      "role": "inhibitor",
+      "aliases": [
+        "polyethyleneimine"
+      ]
+    },
+    {
+      "canonical": "PAA",
+      "role": "inhibitor",
+      "aliases": [
+        "polyacrylic acid"
+      ]
+    },
+    {
+      "canonical": "PVP",
+      "role": "inhibitor",
+      "aliases": [
+        "polyvinylpyrrolidone"
+      ]
+    },
+    {
+      "canonical": "potassium oleate",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "sodium oleate",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "sodium benzoate",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "Na2MoO4",
+      "role": "inhibitor",
+      "aliases": [
+        "sodium molybdate"
+      ]
+    },
+    {
+      "canonical": "Na2SiO3",
+      "role": "inhibitor",
+      "aliases": [
+        "sodium silicate"
+      ]
+    },
+    {
+      "canonical": "Na2WO4",
+      "role": "inhibitor",
+      "aliases": [
+        "sodium tungstate"
+      ]
+    },
+    {
+      "canonical": "CeCl3",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "Ce(NO3)3",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "K2Cr2O7",
+      "role": "inhibitor"
+    },
+    {
+      "canonical": "NaNO2",
+      "role": "inhibitor",
+      "aliases": [
+        "sodium nitrite"
+      ]
+    },
+    {
+      "canonical": "IPA",
+      "role": "organic_solvent",
+      "aliases": [
+        "isopropanol"
+      ]
+    },
+    {
+      "canonical": "DMSO",
+      "role": "organic_solvent"
+    },
+    {
+      "canonical": "NMP",
+      "role": "organic_solvent"
+    },
+    {
+      "canonical": "EG",
+      "role": "organic_solvent",
+      "aliases": [
+        "ethylene glycol"
+      ]
+    }
+  ]
+}

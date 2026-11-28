@@ -21,14 +21,6 @@ import requests
 from tqdm import tqdm
 
 import config
-from config import (
-    FROM_YEAR,
-    REQUEST_TIMEOUT,
-    SEMANTIC_SCHOLAR_API_KEY,
-    SEMANTIC_SCHOLAR_DELAY,
-    SEMANTIC_SCHOLAR_MAX_PER_QUERY,
-    SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY,
-)
 from record_keys import make_record_key
 
 S2_BULK_URL = "https://api.semanticscholar.org/graph/v1/paper/search/bulk"
@@ -44,20 +36,18 @@ S2_BATCH_FIELDS = "paperId,externalIds,isOpenAccess,openAccessPdf"
 # 全域持久化連線與單調時鐘節流狀態
 _SESSION = requests.Session()
 _LAST_REQ_TS: float = 0.0
-_CURRENT_DELAY: float = max(1.1, float(SEMANTIC_SCHOLAR_DELAY))
+_CURRENT_DELAY: float | None = None
 _CONSECUTIVE_OK: int = 0
 _API_KEY_REJECTED: bool = False
 
 
-def _get_cache_path() -> Path:
-    cache_path = getattr(config, "S2_CACHE_PATH", None)
-    if cache_path:
-        return Path(cache_path)
-    return Path(config.METADATA_DIR) / f"{config.METAL_SYMBOL.lower()}_s2_cache.json"
+def _get_cache_path(ctx: config.MetalRunContext | None = None) -> Path:
+    resolved_ctx = ctx or config.default_metal_context()
+    return Path(resolved_ctx.s2_cache_path)
 
 
-def _load_s2_cache() -> dict[str, Any]:
-    path = _get_cache_path()
+def _load_s2_cache(ctx: config.MetalRunContext | None = None) -> dict[str, Any]:
+    path = _get_cache_path(ctx=ctx)
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -71,8 +61,11 @@ def _load_s2_cache() -> dict[str, Any]:
     return {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
 
 
-def _save_s2_cache(cache: dict[str, Any]) -> None:
-    path = _get_cache_path()
+def _save_s2_cache(
+    cache: dict[str, Any],
+    ctx: config.MetalRunContext | None = None,
+) -> None:
+    path = _get_cache_path(ctx=ctx)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -82,23 +75,23 @@ def _save_s2_cache(cache: dict[str, Any]) -> None:
         pass
 
 
-def _build_headers() -> dict[str, str]:
+def _build_headers(api_key: str = "") -> dict[str, str]:
     headers = {
         "User-Agent": "TafelMiningBot/2.0 (academic electrochemistry research)",
         "Accept": "application/json",
     }
-    if SEMANTIC_SCHOLAR_API_KEY and not _API_KEY_REJECTED:
-        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+    if api_key and not _API_KEY_REJECTED:
+        headers["x-api-key"] = api_key
     return headers
 
 
-def _wait_for_rate_limit() -> None:
+def _wait_for_rate_limit(delay: float) -> None:
     """全域單調時鐘節流器：確保任意兩次 HTTP 請求之間至少間隔 _CURRENT_DELAY + jitter 秒。"""
     global _LAST_REQ_TS
     now = time.monotonic()
     if _LAST_REQ_TS > 0.0:
         elapsed = now - _LAST_REQ_TS
-        target_wait = _CURRENT_DELAY + random.uniform(0.08, 0.25)
+        target_wait = delay + random.uniform(0.08, 0.25)
         if elapsed < target_wait:
             time.sleep(target_wait - elapsed)
     _LAST_REQ_TS = time.monotonic()
@@ -130,20 +123,27 @@ def _s2_request_with_retry(
     params: dict | None = None,
     json_body: dict | None = None,
     max_retries: int = 4,
+    ctx: config.MetalRunContext | None = None,
+    settings: config.PipelineSettings | None = None,
 ) -> requests.Response | None:
     """
     具備全域節流、AIMD 動態調速、429 指數退避與 403 API Key 自動降級的 HTTP 請求函式。
     """
     global _LAST_REQ_TS, _CURRENT_DELAY, _CONSECUTIVE_OK, _API_KEY_REJECTED
 
+    s = settings or (ctx.settings if ctx is not None else config.load_settings())
+    base_delay = max(1.0, float(s.semantic_scholar_delay))
+    if _CURRENT_DELAY is None:
+        _CURRENT_DELAY = max(1.1, float(s.semantic_scholar_delay))
+
     for attempt in range(max_retries):
-        _wait_for_rate_limit()
-        headers = _build_headers()
+        _wait_for_rate_limit(_CURRENT_DELAY)
+        headers = _build_headers(s.semantic_scholar_api_key)
 
         try:
             if method == "GET":
                 resp = _SESSION.get(
-                    url, params=params, headers=headers, timeout=REQUEST_TIMEOUT
+                    url, params=params, headers=headers, timeout=s.request_timeout
                 )
             else:
                 resp = _SESSION.post(
@@ -151,18 +151,17 @@ def _s2_request_with_retry(
                     params=params,
                     json=json_body,
                     headers=headers,
-                    timeout=REQUEST_TIMEOUT,
+                    timeout=s.request_timeout,
                 )
             _LAST_REQ_TS = time.monotonic()
 
             if resp.status_code == 200:
                 _CONSECUTIVE_OK += 1
-                base_delay = max(1.0, float(SEMANTIC_SCHOLAR_DELAY))
                 if _CONSECUTIVE_OK >= 4 and _CURRENT_DELAY > base_delay:
                     _CURRENT_DELAY = max(base_delay, round(_CURRENT_DELAY * 0.85, 2))
                 return resp
 
-            if resp.status_code == 403 and SEMANTIC_SCHOLAR_API_KEY and not _API_KEY_REJECTED:
+            if resp.status_code == 403 and s.semantic_scholar_api_key and not _API_KEY_REJECTED:
                 print("  ⚠️  [S2] API Key 回傳 403（可能尚未生效或無該端點權限），自動切換為公開模式重試...")
                 _API_KEY_REJECTED = True
                 _CURRENT_DELAY = max(_CURRENT_DELAY, 2.5)
@@ -211,38 +210,46 @@ def _s2_request_with_retry(
     return None
 
 
-def build_grouped_s2_queries(modes: list[str] | tuple[str, ...] | str | None = None) -> list[str]:
+def build_grouped_s2_queries(
+    modes: list[str] | tuple[str, ...] | str | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> list[str]:
     """
     依選取的搜尋模式（corrosion, cmp_etch, inhibitor, solvent, catalysis）組裝高容量布林查詢。
     因為 /paper/search/bulk 單次 HTTP 請求即可回傳最多 1,000 篇論文，
     濃縮為少數布林請求可將 API 呼叫次數減少 >90%，徹底避免連續請求觸發 429。
     """
-    target = config.TARGET_METAL
-    sym = config.METAL_SYMBOL
-    compounds = list(getattr(config, "COMPOUNDS", []))
-    if modes is not None:
-        active_modes = config.parse_search_modes(modes)
-    elif hasattr(config, "SEARCH_MODES"):
-        active_modes = list(config.SEARCH_MODES)
-    else:
-        active_modes = config.parse_search_modes(getattr(config, "SEARCH_MODE", "corrosion"))
+    resolved_ctx = ctx or config.default_metal_context()
+    target = resolved_ctx.target_metal
+    sym = resolved_ctx.metal_symbol
+    compounds = list(resolved_ctx.compounds)
+    active_modes = (
+        list(resolved_ctx.search_modes)
+        if modes is None
+        else config.parse_search_modes(modes)
+    )
 
-    metal_clause = f'("{target}" | "{sym}")' if target.lower() != sym.lower() else f'"{target}"'
+    metal_clause = config.build_metal_search_clause(target, sym, syntax="s2")
+    filtered_compounds = [
+        c for c in compounds if c and c.strip().lower() not in {target.lower(), sym.lower()}
+    ]
 
     grouped: list[str] = []
 
-    # 1. 一般金屬腐蝕極化與化合物／合金腐蝕極化
+    # 1. 一般金屬腐蝕極化與化合物／合金腐蝕極化（錨定腐蝕相關詞，避免 Ru/Mo 被電催化文獻稀釋）
     if "corrosion" in active_modes:
         grouped.append(
             f'{metal_clause} + ("potentiodynamic polarization" | "corrosion current density" '
             f'| "polarization resistance" | "electrochemical corrosion" | "Tafel extrapolation" '
             f'| "Tafel slope" | "Tafel plot" | "Ecorr" | "icorr") '
-            f'+ ("corrosion" | "polarization" | "anodic" | "cathodic")'
+            f'+ ("corrosion" | "potentiodynamic" | "Ecorr" | "icorr" | "passivation")'
         )
-        if compounds:
-            comp_or = " | ".join(f'"{c}"' for c in compounds)
+        if filtered_compounds:
+            comp_or = " | ".join(f'"{c}"' for c in filtered_compounds)
             grouped.append(
-                f'({comp_or}) + ("potentiodynamic polarization" | "corrosion current density" | "Tafel slope" | "Ecorr")'
+                f'({comp_or}) + ("potentiodynamic polarization" | "corrosion current density" '
+                f'| "electrochemical corrosion" | "Ecorr")'
             )
 
     # 2. 半導體 CMP / 濕蝕刻 / 研磨液 / 氧化劑與電偶腐蝕環境
@@ -293,15 +300,23 @@ def _is_openalex_grouped_queries(queries: list[str]) -> bool:
     return any((" AND " in q or " OR " in q) for q in queries)
 
 
-def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
+def _select_s2_queries(
+    queries: list[str],
+    use_bulk: bool = True,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> list[str]:
     """
     選擇要送往 Semantic Scholar 的查詢清單：
     - 若啟用 use_bulk 且傳入的是完整展開查詢清單（> 8 組）或 OpenAlex 布林濃縮查詢，
       自動使用 build_grouped_s2_queries() 濃縮為 5~7 組 S2 專屬布林查詢（+ / | 語法）。
     - 若呼叫端只傳入少量測試查詢（<= 8 組且非 OpenAlex 布林語法），則直接正規化後執行。
     """
+    resolved_ctx = ctx or config.default_metal_context()
+    settings = resolved_ctx.settings
+
     if use_bulk and (len(queries) > 8 or _is_openalex_grouped_queries(queries)):
-        grouped = build_grouped_s2_queries()
+        grouped = build_grouped_s2_queries(ctx=resolved_ctx)
         if len(queries) > len(grouped):
             reduction = 100 - int(len(grouped) / len(queries) * 100)
             print(
@@ -320,7 +335,7 @@ def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
             seen.add(key)
             normalized.append(nq)
 
-    if SEMANTIC_SCHOLAR_API_KEY or len(normalized) <= SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY:
+    if settings.semantic_scholar_api_key or len(normalized) <= settings.semantic_scholar_max_queries_no_key:
         return normalized
 
     priority_terms = (
@@ -332,7 +347,7 @@ def _select_s2_queries(queries: list[str], use_bulk: bool = True) -> list[str]:
     )
     high = [q for q in normalized if any(t in q.lower() for t in priority_terms)]
     rest = [q for q in normalized if q not in high]
-    return (high + rest)[:SEMANTIC_SCHOLAR_MAX_QUERIES_NO_KEY]
+    return (high + rest)[:settings.semantic_scholar_max_queries_no_key]
 
 
 def _parse_s2_items(
@@ -448,6 +463,7 @@ def _fetch_query_bulk(
     return_raw: bool = False,
     start_token: str | None = None,
     token_out: dict[str, str | None] | None = None,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict] | tuple[list[dict], list[dict], int, int] | None:
     """
     使用 /graph/v1/paper/search/bulk 單次取回最多 1,000 筆結果（依引用數排序）：
@@ -455,10 +471,11 @@ def _fetch_query_bulk(
     - 啟用 known_keys 時：先從單次 1,000 筆內過濾舊 DOI（0 額外請求），若仍不足才依護欄續翻 token。
     - return_raw=True 時回傳 (selected_recs, raw_recs, new_count, skipped_dup) 供外層保存未過濾快取。
     """
+    settings = ctx.settings if ctx is not None else config.load_settings()
     early_stop = max(
         0,
         int(
-            getattr(config, "STEP1_EARLY_STOP_EMPTY_PAGES", 2)
+            settings.step1_early_stop_empty_pages
             if early_stop_empty_pages is None
             else early_stop_empty_pages
         ),
@@ -482,7 +499,7 @@ def _fetch_query_bulk(
         if token:
             params["token"] = token
 
-        resp = _s2_request_with_retry("GET", S2_BULK_URL, params=params)
+        resp = _s2_request_with_retry("GET", S2_BULK_URL, params=params, settings=settings)
         if resp is None:
             if page_idx == 0:
                 return None
@@ -539,13 +556,15 @@ def _fetch_query_standard(
     max_scan_multiplier: int | None = None,
     early_stop_empty_pages: int | None = None,
     return_raw: bool = False,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict] | tuple[list[dict], list[dict], int, int] | None:
     """標準 /graph/v1/paper/search 檢索（支援單元測試或作為 bulk 的備援）。"""
+    settings = ctx.settings if ctx is not None else config.load_settings()
     clean_q = _normalize_query_for_s2(re.sub(r"[+|()]", " ", query_str))
     scan_mult = max(
         1,
         int(
-            getattr(config, "STEP1_MAX_SCAN_MULTIPLIER", 3)
+            settings.step1_max_scan_multiplier
             if max_scan_multiplier is None
             else max_scan_multiplier
         ),
@@ -553,7 +572,7 @@ def _fetch_query_standard(
     early_stop = max(
         0,
         int(
-            getattr(config, "STEP1_EARLY_STOP_EMPTY_PAGES", 2)
+            settings.step1_early_stop_empty_pages
             if early_stop_empty_pages is None
             else early_stop_empty_pages
         ),
@@ -578,7 +597,7 @@ def _fetch_query_standard(
             "year": f"{from_year}-",
             "fields": S2_SEARCH_FIELDS,
         }
-        resp = _s2_request_with_retry("GET", S2_SEARCH_URL, params=params)
+        resp = _s2_request_with_retry("GET", S2_SEARCH_URL, params=params, settings=settings)
         if resp is None:
             if pages_scanned == 0:
                 return None
@@ -632,6 +651,7 @@ def _update_s2_query_cache(
     *,
     use_bulk: bool,
     next_token: str | None,
+    ctx: config.MetalRunContext | None = None,
 ) -> None:
     query_cache = cache.setdefault("queries", {})
     query_tokens = cache.setdefault("query_tokens", {})
@@ -641,43 +661,46 @@ def _update_s2_query_cache(
             query_tokens[cache_key] = next_token
         else:
             query_tokens.pop(cache_key, None)
-    _save_s2_cache(cache)
+    _save_s2_cache(cache, ctx=ctx)
 
 
 def search_semantic_scholar(
-    queries: list[str],
+    queries: list[str] | None = None,
     max_per_query: int | None = None,
     from_year: int | None = None,
     use_cache: bool | None = None,
     known_keys: set[str] | None = None,
     needs_backfill: dict[str, set[str]] | None = None,
-    append: bool | None = None,
+    append: bool = False,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> list[dict]:
     """
     使用 Semantic Scholar Academic Graph API 檢索論文，
     回傳與 step1_search_openalex 相同 schema 的 list[dict]。
     """
-    max_per_query = max_per_query or SEMANTIC_SCHOLAR_MAX_PER_QUERY
-    from_year = from_year or FROM_YEAR
-    if append is None:
-        append = os.environ.get("TAFEL_APPEND") == "1"
-    is_full_pipeline = (len(queries) > 1) or _is_openalex_grouped_queries(queries)
-    use_bulk = bool(getattr(config, "SEMANTIC_SCHOLAR_USE_BULK", True)) and is_full_pipeline
+    resolved_ctx = ctx or config.default_metal_context()
+    settings = resolved_ctx.settings
+
+    queries_list = list(resolved_ctx.search_queries) if queries is None else list(queries)
+    max_per_query = max_per_query or settings.semantic_scholar_max_per_query
+    from_year = from_year or settings.from_year
+    is_full_pipeline = (len(queries_list) > 1) or _is_openalex_grouped_queries(queries_list)
+    use_bulk = bool(settings.semantic_scholar_use_bulk) and is_full_pipeline
     if use_cache is None:
-        # 當執行完整 pipeline 且未設定強制刷快取時啟用本地快取
         use_cache = is_full_pipeline and (os.environ.get("TAFEL_FORCE_S2_REFRESH") != "1")
 
-    selected_queries = _select_s2_queries(queries, use_bulk=use_bulk)
+    selected_queries = _select_s2_queries(queries_list, use_bulk=use_bulk, ctx=resolved_ctx)
 
     key_status = (
         "已設定 API Key"
-        if (SEMANTIC_SCHOLAR_API_KEY and not _API_KEY_REJECTED)
+        if (settings.semantic_scholar_api_key and not _API_KEY_REJECTED)
         else "無 API Key（公開額度模式）"
     )
     endpoint_mode = "Bulk Boolean (/search/bulk)" if use_bulk else "Standard (/search)"
     print(f"\n[Semantic Scholar] 開始搜尋（{len(selected_queries)} 組查詢，{endpoint_mode}，{key_status}）")
 
-    cache = _load_s2_cache() if use_cache else {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
+    cache = _load_s2_cache(ctx=resolved_ctx) if use_cache else {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
     query_cache: dict[str, list[dict]] = cache.get("queries", {})
     query_tokens: dict[str, str] = cache.setdefault("query_tokens", {})
     cache_hits = 0
@@ -686,7 +709,7 @@ def search_semantic_scholar(
     total_new = 0
     total_skipped = 0
     consecutive_failures = 0
-    max_bulk_pages = min(2, max(1, int(getattr(config, "STEP1_MAX_SCAN_MULTIPLIER", 3))))
+    max_bulk_pages = min(2, max(1, int(settings.step1_max_scan_multiplier)))
 
     for q in tqdm(selected_queries, desc="Semantic Scholar search"):
         raw_cache_key = f"{q}||y>={from_year}||bulk_raw" if use_bulk else f"{q}||y>={from_year}||m={max_per_query}"
@@ -732,6 +755,7 @@ def search_semantic_scholar(
                     return_raw=True,
                     start_token=saved_token,
                     token_out=tok_box,
+                    ctx=resolved_ctx,
                 )
                 if ext_res is not None:
                     ext_recs, ext_raw, ext_new, ext_skip = ext_res
@@ -745,6 +769,7 @@ def search_semantic_scholar(
                         merged_raw,
                         use_bulk=True,
                         next_token=tok_box.get("next_token"),
+                        ctx=resolved_ctx,
                     )
             continue
 
@@ -760,6 +785,7 @@ def search_semantic_scholar(
                 max_bulk_pages=max_bulk_pages,
                 return_raw=True,
                 token_out=tok_box,
+                ctx=resolved_ctx,
             )
             # 若 bulk 意外無回應，降級嘗試一次標準 search（不覆寫 bulk_raw 快取）
             if res is None:
@@ -771,6 +797,7 @@ def search_semantic_scholar(
                     known_keys=known_keys,
                     needs_backfill=needs_backfill,
                     return_raw=True,
+                    ctx=resolved_ctx,
                 )
         else:
             res = _fetch_query_standard(
@@ -780,6 +807,7 @@ def search_semantic_scholar(
                 known_keys=known_keys,
                 needs_backfill=needs_backfill,
                 return_raw=True,
+                ctx=resolved_ctx,
             )
 
         if res is None:
@@ -802,6 +830,7 @@ def search_semantic_scholar(
                     raw_recs,
                     use_bulk=use_bulk,
                     next_token=tok_box.get("next_token"),
+                    ctx=resolved_ctx,
                 )
 
     # 內部先依 DOI 去重回報統計
@@ -823,15 +852,18 @@ def batch_lookup_pdf_urls(
     dois: list[str],
     batch_size: int = 200,
     use_cache: bool | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
 ) -> dict[str, dict]:
     """
     使用 Semantic Scholar POST /paper/batch 一次查詢最多 200 筆 DOI 的 openAccessPdf URL。
     回傳 {normalized_doi_lower: {"s2_pdf_url": ..., "is_oa_s2": ..., "s2_paper_id": ...}}。
     """
+    resolved_ctx = ctx or config.default_metal_context()
     if use_cache is None:
         use_cache = (len(dois) > 5) and (os.environ.get("TAFEL_FORCE_S2_REFRESH") != "1")
 
-    cache = _load_s2_cache() if use_cache else {"queries": {}, "pdf_batch": {}}
+    cache = _load_s2_cache(ctx=resolved_ctx) if use_cache else {"queries": {}, "pdf_batch": {}}
     batch_cache: dict[str, dict] = cache.get("pdf_batch", {})
 
     results: dict[str, dict] = {}
@@ -872,6 +904,7 @@ def batch_lookup_pdf_urls(
             S2_BATCH_URL,
             params={"fields": S2_BATCH_FIELDS},
             json_body={"ids": ids},
+            ctx=resolved_ctx,
         )
         if resp is None:
             print("  ⚠️  [S2] Batch 查詢失敗，略過本批並繼續。")
@@ -902,7 +935,7 @@ def batch_lookup_pdf_urls(
 
         if use_cache:
             cache["pdf_batch"] = batch_cache
-            _save_s2_cache(cache)
+            _save_s2_cache(cache, ctx=resolved_ctx)
 
     print(f"[Semantic Scholar] 批次補齊 {len(results)} 筆 OA PDF URL")
     return results

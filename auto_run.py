@@ -22,19 +22,20 @@ import shutil
 import subprocess
 import sys
 
-BASE_DIR = Path(__file__).resolve().parent
+import config
 
-# === 可自定義設定區 ===
-DEFAULT_METALS = ["Co", "W", "Ru", "Ti", "TiN", "TaN", "WN", "MoN", "Al", "Ta", "Mn", "Mo"]  
-# 目標金屬與氮化物清單（需存在於 metals_db.json）；建議維持此 13 種目標材料，或依研究需求增減
-# "Cu", "Co", "W", "Ru", "Ti", "TiN", "TaN", "WN", "MoN", "Al", "Ta", "Mn", "Mo"
-DEFAULT_SEARCH_MODES = ["solvent", "corrosion", "cmp_etch", "inhibitor"]  # 傳給 run_all.py --search-mode 的檢索模式；建議保留全 4 種以最大化覆蓋率，若只看特定領域可縮減為 1~2 種
+BASE_DIR = Path(__file__).resolve().parent
+_SETTINGS = config.load_settings()
+
+# === 可自定義設定區（預設金屬、檢索模式與合併目錄統一源自 user_settings.py / PipelineSettings） ===
+DEFAULT_METALS = list(_SETTINGS.metals_to_run)
+DEFAULT_SEARCH_MODES = list(_SETTINGS.default_search_modes)
 DEFAULT_THRESHOLD = 1000  # 單一金屬累計筆數達標門檻（達此值將於下一輪從 run_all.py 指令中剔除）；建議 3000~5000（快速建模建議 3000，完整訓練集建議 5000，深度擴充可用 8000~10000）
 DEFAULT_ROUNDS = 50  # 自動執行總輪數（每輪依序執行：備份 -> run_all.py -> 檢查與記錄報告）；建議先設 2~3（單輪耗時較長，建議 2 輪後再視成長幅度與硬碟空間調整）
 
-MERGED_DIR = BASE_DIR / "data" / "merged"  # step6/step7 合併輸出與每輪備份的來源資料夾；建議維持 BASE_DIR / "data" / "merged"
+MERGED_DIR = _SETTINGS.simulator_data_dir  # step6/step7 合併輸出與每輪備份的來源資料夾
 OLD_DATA_DIR = BASE_DIR / "old data"  # 歷史備份資料夾（會在底下建立 yyyymmdd-hhmm 子資料夾）；建議維持 BASE_DIR / "old data"（若本機空間不足可改為外接硬碟路徑）
-QUALITY_REPORT_PATH = MERGED_DIR / "quality_report.md"  # step6 產生的品質報告路徑（用來解析第 4 節各金屬筆數）；建議維持 MERGED_DIR / "quality_report.md"
+QUALITY_REPORT_PATH = MERGED_DIR / "quality_report.md"  # step6 產生的品質報告路徑（用來解析第 4 節各金屬筆數）
 RUN_ALL_PATH = BASE_DIR / "run_all.py"  # 主管線執行腳本路徑；建議維持 BASE_DIR / "run_all.py"
 DEFAULT_HISTORY_CSV = OLD_DATA_DIR / "auto_run_history.csv"  # 每輪累計筆數的 CSV 紀錄檔路徑；建議維持 OLD_DATA_DIR / "auto_run_history.csv"
 

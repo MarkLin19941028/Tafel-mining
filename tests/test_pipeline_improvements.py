@@ -4,12 +4,32 @@ Unit tests for Step 5 & Step 6 data filtering, normalization, classification, an
 
 import json
 import os
+import tempfile
 import unittest
 from collections import Counter
 
-os.environ["TAFEL_QUIET_CONFIG"] = "1"
-
 import pandas as pd
+
+import config
+
+
+def _make_test_ctx(
+    tmpdir: str,
+    metal: str = "Cu",
+    *,
+    search_modes: tuple[str, ...] | list[str] = ("corrosion",),
+    search_queries: list[str] | tuple[str, ...] | None = None,
+    skip_openalex: bool = False,
+    **settings_overrides,
+) -> config.MetalRunContext:
+    settings = config.load_settings(data_root=tmpdir, **settings_overrides)
+    return config.build_metal_context(
+        metal,
+        search_modes=list(search_modes),
+        settings=settings,
+        search_queries=search_queries,
+        skip_openalex=skip_openalex,
+    )
 
 from step5_constants import (
     convert_log_icorr_to_uA_cm2,
@@ -278,14 +298,14 @@ class TestStep6Deduplication(unittest.TestCase):
 
 class TestNitrideMetalsAndInhibitors(unittest.TestCase):
     def test_databases_valid_with_wn_and_mon(self):
-        import config
         from materials_loader import validate_databases
         from step5_constants import KNOWN_MATERIALS
         from step7_enrich_data import COMPOUND_OVERRIDES, resolve_base_element
 
-        self.assertIn("WN", config.METALS_TO_RUN)
-        self.assertIn("MoN", config.METALS_TO_RUN)
-        errors, warnings = validate_databases(config.METALS_TO_RUN)
+        settings = config.load_settings()
+        self.assertIn("WN", settings.metals_to_run)
+        self.assertIn("MoN", settings.metals_to_run)
+        errors, warnings = validate_databases(list(settings.metals_to_run))
         self.assertEqual(errors, [])
         self.assertEqual(warnings, [])
 
@@ -376,15 +396,17 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
         self.assertEqual(merged.loc[0, "abstract"], "Filled")
 
     def test_user_settings_and_modular_search_modes(self):
-        import config
         import europepmc_fetcher as epmc
         import run_all
         import semantic_scholar_fetcher as s2f
         import user_settings
 
+        settings = config.load_settings()
+        cu_ctx = config.build_metal_context("Cu", settings=settings)
+
         # user_settings exports default 4 corrosion-focused modes (catalysis excluded by default)
         self.assertEqual(user_settings.SEARCH_MODES, ["corrosion", "cmp_etch", "inhibitor", "solvent"])
-        self.assertEqual(config.MAILTO, user_settings.MAILTO)
+        self.assertEqual(settings.mailto, user_settings.MAILTO)
 
         # parse_search_modes handles lists, space/comma strings, 'all', and rejects unknown modes
         self.assertEqual(config.parse_search_modes(["cmp_etch", "inhibitor"]), ["cmp_etch", "inhibitor"])
@@ -398,13 +420,29 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
             config.parse_search_modes(["cmp_etch", "unknown_mode"])
 
         # Each engine strictly reflects only the selected modes
-        oa_cmp_inh = config.build_search_queries(["cmp_etch", "inhibitor"])
+        oa_cmp_inh = config.build_search_queries(
+            ["cmp_etch", "inhibitor"],
+            target_metal=cu_ctx.target_metal,
+            metal_symbol=cu_ctx.metal_symbol,
+            compounds=cu_ctx.compounds,
+            cmp_queries=cu_ctx.cmp_queries,
+            inhibitor_queries=cu_ctx.inhibitor_queries,
+            grouped=settings.openalex_use_grouped_queries,
+        )
         self.assertTrue(any('"CMP"' in q for q in oa_cmp_inh))
         self.assertTrue(any('"corrosion inhibitor"' in q for q in oa_cmp_inh))
         self.assertFalse(any('"hydrogen evolution"' in q for q in oa_cmp_inh))
         self.assertFalse(any('"non-aqueous"' in q for q in oa_cmp_inh))
 
-        oa_solvent = config.build_search_queries(["solvent"])
+        oa_solvent = config.build_search_queries(
+            ["solvent"],
+            target_metal=cu_ctx.target_metal,
+            metal_symbol=cu_ctx.metal_symbol,
+            compounds=cu_ctx.compounds,
+            cmp_queries=cu_ctx.cmp_queries,
+            inhibitor_queries=cu_ctx.inhibitor_queries,
+            grouped=settings.openalex_use_grouped_queries,
+        )
         for kw in (
             "non-aqueous",
             "nonaqueous",
@@ -421,21 +459,21 @@ class TestNitrideMetalsAndInhibitors(unittest.TestCase):
             self.assertTrue(any(f'"{kw}"' in q for q in oa_solvent), f"Missing solvent keyword: {kw}")
         self.assertFalse(any('"CMP"' in q for q in oa_solvent))
 
-        s2_cat = s2f.build_grouped_s2_queries(["catalysis"])
+        s2_cat = s2f.build_grouped_s2_queries(["catalysis"], ctx=cu_ctx)
         self.assertTrue(any("hydrogen evolution" in q for q in s2_cat))
         self.assertFalse(any("corrosion inhibitor" in q for q in s2_cat))
 
-        s2_solvent = s2f.build_grouped_s2_queries(["solvent"])
+        s2_solvent = s2f.build_grouped_s2_queries(["solvent"], ctx=cu_ctx)
         self.assertEqual(len(s2_solvent), 1)
         self.assertIn('"non-aqueous"', s2_solvent[0])
         self.assertIn('"aprotic solvent"', s2_solvent[0])
 
-        epmc_cmp_inh = epmc.build_europepmc_query(["cmp_etch", "inhibitor"])
+        epmc_cmp_inh = epmc.build_europepmc_query(["cmp_etch", "inhibitor"], ctx=cu_ctx)
         self.assertIn('"chemical mechanical"', epmc_cmp_inh)
         self.assertIn('"corrosion inhibitor"', epmc_cmp_inh)
         self.assertNotIn('"Tafel extrapolation"', epmc_cmp_inh)
 
-        epmc_solvent = epmc.build_europepmc_query(["solvent"])
+        epmc_solvent = epmc.build_europepmc_query(["solvent"], ctx=cu_ctx)
         self.assertIn('"non-aqueous"', epmc_solvent)
         self.assertIn('"semi-aqueous"', epmc_solvent)
         self.assertNotIn('"chemical mechanical"', epmc_solvent)
@@ -822,45 +860,52 @@ class TestStep1InflightDedup(unittest.TestCase):
         self.assertNotIn("10.1000/already_known", needs_backfill)
 
         # End-to-end cache reuse across different known_keys via search_semantic_scholar
-        mem_cache: dict = {"queries": {}, "pdf_batch": {}}
-        with patch.object(s2f, "_load_s2_cache", side_effect=lambda: mem_cache), \
-             patch.object(s2f, "_save_s2_cache", side_effect=lambda c: mem_cache.update(c)), \
-             patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
-             patch.object(s2f, "_s2_request_with_retry", return_value=mock_resp) as mock_req2:
-            # First call populates raw cache with all 4 items, returns first 1 new (p3)
-            run1 = s2f.search_semantic_scholar(
-                ["q1", "q2"],
-                max_per_query=1,
-                from_year=2005,
-                use_cache=True,
-                known_keys={"10.1000/already_known", "10.1000/already_full"},
-                needs_backfill={},
-            )
-            self.assertEqual(mock_req2.call_count, 1)
-            self.assertEqual([r["doi"] for r in run1], ["https://doi.org/10.1000/s2_new1"])
+        with tempfile.TemporaryDirectory() as td1:
+            ctx1 = _make_test_ctx(td1, "Cu")
+            with patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
+                 patch.object(s2f, "_s2_request_with_retry", return_value=mock_resp) as mock_req2:
+                # First call populates raw cache with all 4 items, returns first 1 new (p3)
+                run1 = s2f.search_semantic_scholar(
+                    ["q1", "q2"],
+                    max_per_query=1,
+                    from_year=2005,
+                    use_cache=True,
+                    known_keys={"10.1000/already_known", "10.1000/already_full"},
+                    needs_backfill={},
+                    ctx=ctx1,
+                )
+                self.assertEqual(mock_req2.call_count, 1)
+                self.assertEqual([r["doi"] for r in run1], ["https://doi.org/10.1000/s2_new1"])
 
-            # Second call reuses cache (0 extra API calls) with p3 now known -> yields p4!
-            run2 = s2f.search_semantic_scholar(
-                ["q1", "q2"],
-                max_per_query=1,
-                from_year=2005,
-                use_cache=True,
-                known_keys={"10.1000/already_known", "10.1000/already_full", "10.1000/s2_new1"},
-                needs_backfill={},
-            )
-            self.assertEqual(mock_req2.call_count, 1)
-            self.assertEqual([r["doi"] for r in run2], ["https://doi.org/10.1000/s2_new2"])
+                # Second call reuses cache (0 extra API calls) with p3 now known -> yields p4!
+                run2 = s2f.search_semantic_scholar(
+                    ["q1", "q2"],
+                    max_per_query=1,
+                    from_year=2005,
+                    use_cache=True,
+                    known_keys={"10.1000/already_known", "10.1000/already_full", "10.1000/s2_new1"},
+                    needs_backfill={},
+                    ctx=ctx1,
+                )
+                self.assertEqual(mock_req2.call_count, 1)
+                self.assertEqual([r["doi"] for r in run2], ["https://doi.org/10.1000/s2_new2"])
 
         # Degraded fallback (bulk returns None, standard succeeds) must NOT pollute bulk_raw cache
-        degraded_cache: dict = {"queries": {}, "pdf_batch": {}}
-        with patch.object(s2f, "_load_s2_cache", side_effect=lambda: degraded_cache), \
-             patch.object(s2f, "_save_s2_cache", side_effect=lambda c: degraded_cache.update(c)), \
-             patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
-             patch.object(s2f, "_fetch_query_bulk", return_value=None), \
-             patch.object(s2f, "_fetch_query_standard", return_value=([{"doi": "https://doi.org/10.1000/s2_new1"}], [{"doi": "https://doi.org/10.1000/s2_new1"}], 1, 0)):
-            run_deg = s2f.search_semantic_scholar(["q1", "q2"], max_per_query=1, from_year=2005, use_cache=True, known_keys=set())
-            self.assertEqual(len(run_deg), 1)
-            self.assertEqual(degraded_cache["queries"], {})
+        with tempfile.TemporaryDirectory() as td2:
+            ctx2 = _make_test_ctx(td2, "Cu")
+            with patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
+                 patch.object(s2f, "_fetch_query_bulk", return_value=None), \
+                 patch.object(s2f, "_fetch_query_standard", return_value=([{"doi": "https://doi.org/10.1000/s2_new1"}], [{"doi": "https://doi.org/10.1000/s2_new1"}], 1, 0)):
+                run_deg = s2f.search_semantic_scholar(
+                    ["q1", "q2"],
+                    max_per_query=1,
+                    from_year=2005,
+                    use_cache=True,
+                    known_keys=set(),
+                    ctx=ctx2,
+                )
+                self.assertEqual(len(run_deg), 1)
+                self.assertEqual(s2f._load_s2_cache(ctx=ctx2)["queries"], {})
 
     def test_europepmc_inflight_dedup_preserves_pmcid_backfill(self):
         from unittest.mock import MagicMock, patch
@@ -985,7 +1030,13 @@ class TestStep1To3Optimizations(unittest.TestCase):
 
         # Verify partial results are saved atomically when RuntimeError occurs mid-run
         with tempfile.TemporaryDirectory() as tmpdir:
-            out_csv = os.path.join(tmpdir, "cu_meta.csv")
+            ctx = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                search_queries=["q1", "q2"],
+                enable_semantic_scholar=False,
+                enable_europepmc_xml=False,
+            )
             calls = [0]
 
             def _fake_fetch(*args, **kwargs):
@@ -1012,13 +1063,11 @@ class TestStep1To3Optimizations(unittest.TestCase):
                     }]
                 raise RuntimeError("OpenAlex quota exceeded")
 
-            with patch.object(s1, "STEP1_OUTPUT", out_csv), \
-                 patch.object(s1, "SEARCH_QUERIES", ["q1", "q2"]), \
-                 patch.object(s1, "fetch_single_query", side_effect=_fake_fetch):
+            with patch.object(s1, "fetch_single_query", side_effect=_fake_fetch):
                 with self.assertRaises(RuntimeError):
-                    s1.run_search(append=False)
-            self.assertTrue(os.path.exists(out_csv))
-            saved = pd.read_csv(out_csv)
+                    s1.run_search(append=False, ctx=ctx)
+            self.assertTrue(os.path.exists(ctx.step1_output))
+            saved = pd.read_csv(ctx.step1_output)
             self.assertEqual(len(saved), 1)
             self.assertEqual(saved.loc[0, "doi"], "https://doi.org/10.1000/rel")
 
@@ -1036,14 +1085,19 @@ class TestStep1To3Optimizations(unittest.TestCase):
         self.assertEqual(mock_get.call_count, 3)
 
     def test_step2_skips_irrelevant_and_existing_pdf_and_runs_s2_first(self):
-        import tempfile
         from unittest.mock import patch
-        import config
         import step2_find_pdf_urls as s2
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            s1_csv = os.path.join(tmpdir, "s1.csv")
-            s2_csv = os.path.join(tmpdir, "s2.csv")
+            ctx = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                step2_skip_unpaywall_if_has_pdf=True,
+                step2_unpaywall_delay=0.0,
+                require_target_in_title_abstract=True,
+                enable_semantic_scholar=True,
+            )
+            ctx.ensure_dirs()
             pd.DataFrame([
                 # Irrelevant -> skipped for both S2 and Unpaywall
                 {"doi": "https://doi.org/10.1000/irrel", "pmcid": None, "title": "Steel corrosion", "abstract": "Iron only", "best_pdf_url": None, "primary_pdf_url": None},
@@ -1053,11 +1107,11 @@ class TestStep1To3Optimizations(unittest.TestCase):
                 {"doi": "https://doi.org/10.1000/s2_hit", "pmcid": None, "title": "Copper CMP", "abstract": "Cu slurry", "best_pdf_url": None, "primary_pdf_url": None},
                 # Relevant + missing PDF -> S2 misses -> queried on Unpaywall
                 {"doi": "https://doi.org/10.1000/unp_hit", "pmcid": None, "title": "CuO etching", "abstract": "Copper oxide", "best_pdf_url": None, "primary_pdf_url": None},
-            ]).to_csv(s1_csv, index=False)
+            ]).to_csv(ctx.step1_output, index=False)
 
             unp_calls = []
 
-            def _fake_unp(doi):
+            def _fake_unp(doi, **_kwargs):
                 unp_calls.append(doi)
                 return {
                     "unpaywall_pdf_url": "https://unp.org/found.pdf",
@@ -1066,18 +1120,12 @@ class TestStep1To3Optimizations(unittest.TestCase):
                     "is_oa_unpaywall": True,
                 }
 
-            def _fake_s2_batch(dois):
+            def _fake_s2_batch(dois, **_kwargs):
                 return {"10.1000/s2_hit": {"s2_pdf_url": "https://s2.org/hit.pdf", "is_oa_s2": True, "s2_paper_id": "p1"}}
 
-            with patch.object(s2, "STEP1_OUTPUT", s1_csv), \
-                 patch.object(s2, "STEP2_OUTPUT", s2_csv), \
-                 patch.object(s2, "STEP2_SKIP_UNPAYWALL_IF_HAS_PDF", True), \
-                 patch.object(s2, "STEP2_UNPAYWALL_DELAY", 0.0), \
-                 patch.object(s2, "REQUIRE_TARGET_IN_TITLE_ABSTRACT", True), \
-                 patch.object(s2, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
-                 patch.object(s2, "find_pdf_url", side_effect=_fake_unp), \
+            with patch.object(s2, "find_pdf_url", side_effect=_fake_unp), \
                  patch("semantic_scholar_fetcher.batch_lookup_pdf_urls", side_effect=_fake_s2_batch) as mock_s2:
-                out_df = s2.run_find_pdfs(append=False)
+                out_df = s2.run_find_pdfs(append=False, ctx=ctx)
 
             # S2 Batch only received the 2 relevant missing-PDF DOIs
             self.assertEqual(mock_s2.call_count, 1)
@@ -1154,24 +1202,27 @@ class TestStep1To3Optimizations(unittest.TestCase):
             self.assertTrue(os.path.exists(save_path))
 
     def test_step2_checkpoint_interrupt_and_append_resume(self):
-        import tempfile
         from unittest.mock import patch
-        import config
         import step2_find_pdf_urls as s2
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            s1_csv = os.path.join(tmpdir, "s1.csv")
-            s2_csv = os.path.join(tmpdir, "s2.csv")
-            state_json = os.path.join(tmpdir, "state.json")
+            ctx = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                enable_semantic_scholar=False,
+                step2_checkpoint_every=1,
+                step2_unpaywall_delay=0.0,
+            )
+            ctx.ensure_dirs()
             pd.DataFrame([
                 {"doi": "https://doi.org/10.1000/p1", "pmcid": None, "title": "Copper 1", "abstract": "Cu", "best_pdf_url": None, "primary_pdf_url": None},
                 {"doi": "https://doi.org/10.1000/p2", "pmcid": None, "title": "Copper 2", "abstract": "Cu", "best_pdf_url": None, "primary_pdf_url": None},
                 {"doi": "https://doi.org/10.1000/p3", "pmcid": None, "title": "Copper 3", "abstract": "Cu", "best_pdf_url": None, "primary_pdf_url": None},
-            ]).to_csv(s1_csv, index=False)
+            ]).to_csv(ctx.step1_output, index=False)
 
             calls_run1 = []
 
-            def _unp_interrupt_on_second(doi):
+            def _unp_interrupt_on_second(doi, **_kwargs):
                 calls_run1.append(doi)
                 if doi.endswith("/p2"):
                     raise KeyboardInterrupt("simulated Ctrl+C")
@@ -1182,19 +1233,12 @@ class TestStep1To3Optimizations(unittest.TestCase):
                     "is_oa_unpaywall": True,
                 }
 
-            with patch.object(s2, "STEP1_OUTPUT", s1_csv), \
-                 patch.object(s2, "STEP2_OUTPUT", s2_csv), \
-                 patch.object(s2, "DOWNLOAD_STATE_PATH", state_json), \
-                 patch.object(s2, "ENABLE_SEMANTIC_SCHOLAR", False), \
-                 patch.object(s2, "STEP2_CHECKPOINT_EVERY", 1), \
-                 patch.object(s2, "STEP2_UNPAYWALL_DELAY", 0.0), \
-                 patch.object(s2, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
-                 patch.object(s2, "find_pdf_url", side_effect=_unp_interrupt_on_second):
+            with patch.object(s2, "find_pdf_url", side_effect=_unp_interrupt_on_second):
                 with self.assertRaises(KeyboardInterrupt):
-                    s2.run_find_pdfs(append=False)
+                    s2.run_find_pdfs(append=False, ctx=ctx)
 
-            self.assertTrue(os.path.exists(s2_csv))
-            mid_df = pd.read_csv(s2_csv)
+            self.assertTrue(os.path.exists(ctx.step2_output))
+            mid_df = pd.read_csv(ctx.step2_output)
             self.assertTrue(bool(mid_df.loc[0, "step2_checked"]))
             self.assertFalse(bool(mid_df.loc[1, "step2_checked"]))
             self.assertFalse(bool(mid_df.loc[2, "step2_checked"]))
@@ -1202,7 +1246,7 @@ class TestStep1To3Optimizations(unittest.TestCase):
             # Resuming with append=True must skip p1 and query p2 & p3
             calls_run2 = []
 
-            def _unp_ok(doi):
+            def _unp_ok(doi, **_kwargs):
                 calls_run2.append(doi)
                 return {
                     "unpaywall_pdf_url": f"https://unp.org/{doi.split('/')[-1]}.pdf",
@@ -1211,14 +1255,8 @@ class TestStep1To3Optimizations(unittest.TestCase):
                     "is_oa_unpaywall": True,
                 }
 
-            with patch.object(s2, "STEP1_OUTPUT", s1_csv), \
-                 patch.object(s2, "STEP2_OUTPUT", s2_csv), \
-                 patch.object(s2, "DOWNLOAD_STATE_PATH", state_json), \
-                 patch.object(s2, "ENABLE_SEMANTIC_SCHOLAR", False), \
-                 patch.object(s2, "STEP2_UNPAYWALL_DELAY", 0.0), \
-                 patch.object(s2, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
-                 patch.object(s2, "find_pdf_url", side_effect=_unp_ok):
-                final_df = s2.run_find_pdfs(append=True)
+            with patch.object(s2, "find_pdf_url", side_effect=_unp_ok):
+                final_df = s2.run_find_pdfs(append=True, ctx=ctx)
 
             self.assertEqual(calls_run2, [
                 "https://doi.org/10.1000/p2",
@@ -1228,24 +1266,26 @@ class TestStep1To3Optimizations(unittest.TestCase):
             self.assertEqual(final_df["final_pdf_url"].notna().sum(), 3)
 
     def test_step3_concurrent_breaker_triggers_epmc_fallback(self):
-        import tempfile
         from unittest.mock import patch
-        import config
         import step3_download_pdfs as s3
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            s2_csv = os.path.join(tmpdir, "s2.csv")
-            pdf_dir = os.path.join(tmpdir, "pdfs")
-            text_dir = os.path.join(tmpdir, "texts")
-            state_json = os.path.join(tmpdir, "state.json")
-            os.makedirs(pdf_dir)
-            os.makedirs(text_dir)
+            ctx = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                download_delay=0.0,
+                europepmc_delay=0.0,
+                step3_max_workers=2,
+                step3_domain_403_threshold=1,
+                enable_europepmc_xml=True,
+            )
+            ctx.ensure_dirs()
 
             pd.DataFrame([
                 {"doi": "https://doi.org/10.1000/b1", "pmcid": None, "title": "Copper 1", "abstract": "Cu", "final_pdf_url": "https://blocked.example.com/1.pdf"},
                 {"doi": "https://doi.org/10.1000/b2", "pmcid": None, "title": "Copper 2", "abstract": "Cu", "final_pdf_url": "https://blocked.example.com/2.pdf"},
                 {"doi": "https://doi.org/10.1000/b3", "pmcid": None, "title": "Copper 3", "abstract": "Cu", "final_pdf_url": "https://blocked.example.com/3.pdf"},
-            ]).to_csv(s2_csv, index=False)
+            ]).to_csv(ctx.step2_output, index=False)
 
             pdf_attempts = []
 
@@ -1253,28 +1293,18 @@ class TestStep1To3Optimizations(unittest.TestCase):
                 pdf_attempts.append(url)
                 return False, "403 Forbidden（出版社設有防爬蟲/訂閱限制）"
 
-            def _fake_epmc_fallback(doi, base_name, tdir):
+            def _fake_epmc_fallback(doi, base_name, tdir, **kwargs):
                 if doi.endswith("/b3"):
                     with open(os.path.join(tdir, base_name + ".txt"), "w", encoding="utf-8") as f:
                         f.write("Copper Tafel data from EPMC fallback")
                     return True, 1
                 return False, 0
 
-            with patch.object(s3, "STEP2_OUTPUT", s2_csv), \
-                 patch.object(s3, "PDF_DIR", pdf_dir), \
-                 patch.object(s3, "TEXT_DIR", text_dir), \
-                 patch.object(s3, "DOWNLOAD_STATE_PATH", state_json), \
-                 patch.object(s3, "DOWNLOAD_DELAY", 0.0), \
-                 patch.object(s3, "EUROPEPMC_DELAY", 0.0), \
-                 patch.object(s3, "STEP3_MAX_WORKERS", 2), \
-                 patch.object(s3, "STEP3_DOMAIN_403_THRESHOLD", 1), \
-                 patch.object(s3, "ENABLE_EUROPEPMC_XML", True), \
-                 patch.object(s3, "build_target_regex", return_value=config.build_target_regex("copper", "Cu", ["CuO"])), \
-                 patch.object(s3, "download_pdf", side_effect=_fake_download_pdf), \
+            with patch.object(s3, "download_pdf", side_effect=_fake_download_pdf), \
                  patch("europepmc_fetcher.try_fallback_from_europepmc", side_effect=_fake_epmc_fallback):
-                s3.run_download(retry_failed=False)
+                s3.run_download(retry_failed=False, ctx=ctx)
 
-            with open(state_json, "r", encoding="utf-8") as f:
+            with open(ctx.download_state_path, "r", encoding="utf-8") as f:
                 saved_state = json.load(f)
             # b3 was rescued via Europe PMC fallback even after domain 403 breaker tripped
             self.assertEqual(saved_state["10.1000/b3"]["status"], s3.STATUS_DONE_EPMC)
@@ -1304,43 +1334,62 @@ class TestStep1To3Optimizations(unittest.TestCase):
         page2_resp = MagicMock()
         page2_resp.json.return_value = {"data": [_s2_item("p2", "10.1000/p2")], "token": None}
 
-        mem_cache: dict = {"queries": {}, "query_tokens": {}, "pdf_batch": {}}
-        with patch.object(s2f, "_load_s2_cache", side_effect=lambda: mem_cache), \
-             patch.object(s2f, "_save_s2_cache", side_effect=lambda c: mem_cache.update(c)), \
-             patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
-             patch.object(s2f, "_s2_request_with_retry", side_effect=[page1_resp, page2_resp]) as mock_req:
-            # First run caches page1 + tok_page2
-            r1 = s2f.search_semantic_scholar(
-                ["q1", "q2"], max_per_query=1, from_year=2005, use_cache=True, known_keys=set(), append=False
-            )
-            self.assertEqual([r["doi"] for r in r1], ["https://doi.org/10.1000/p1"])
-            # Second run with append=True (no TAFEL_APPEND env var) advances via saved token to fetch p2!
-            r2 = s2f.search_semantic_scholar(
-                ["q1", "q2"], max_per_query=1, from_year=2005, use_cache=True, known_keys={"10.1000/p1"}, append=True
-            )
-            self.assertEqual([r["doi"] for r in r2], ["https://doi.org/10.1000/p2"])
-            self.assertEqual(mock_req.call_count, 2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = _make_test_ctx(tmpdir, "Cu")
+            with patch.object(s2f, "_select_s2_queries", return_value=['"copper" + "Tafel"']), \
+                 patch.object(s2f, "_s2_request_with_retry", side_effect=[page1_resp, page2_resp]) as mock_req:
+                # First run caches page1 + tok_page2
+                r1 = s2f.search_semantic_scholar(
+                    ["q1", "q2"],
+                    max_per_query=1,
+                    from_year=2005,
+                    use_cache=True,
+                    known_keys=set(),
+                    append=False,
+                    ctx=ctx,
+                )
+                self.assertEqual([r["doi"] for r in r1], ["https://doi.org/10.1000/p1"])
+                # Second run with append=True (no TAFEL_APPEND env var) advances via saved token to fetch p2!
+                r2 = s2f.search_semantic_scholar(
+                    ["q1", "q2"],
+                    max_per_query=1,
+                    from_year=2005,
+                    use_cache=True,
+                    known_keys={"10.1000/p1"},
+                    append=True,
+                    ctx=ctx,
+                )
+                self.assertEqual([r["doi"] for r in r2], ["https://doi.org/10.1000/p2"])
+                self.assertEqual(mock_req.call_count, 2)
 
 
 class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
     def test_step1_cursor_store_and_openalex_epmc_resume_and_exhausted_skip(self):
-        import tempfile
         from unittest.mock import MagicMock, patch
         import europepmc_fetcher as epmc
         import step1_search_openalex as s1
         from step1_cursor_state import Step1CursorStore, make_cursor_key
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            state_path = os.path.join(tmpdir, "cu_step1_cursor_state.json")
-            out_csv = os.path.join(tmpdir, "cu_meta.csv")
-            store = Step1CursorStore(state_path)
+            ctx = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                search_queries=["q_done", "q_resume"],
+                max_records_per_query=10,
+                enable_openalex=True,
+                enable_semantic_scholar=False,
+                enable_europepmc_xml=False,
+            )
+            ctx.ensure_dirs()
+            from_year = ctx.settings.from_year
+            store = Step1CursorStore(ctx.step1_cursor_state_path)
 
-            k_done = make_cursor_key("openalex", "q_done", s1.FROM_YEAR)
-            k_resume = make_cursor_key("openalex", "q_resume", s1.FROM_YEAR)
+            k_done = make_cursor_key("openalex", "q_done", from_year)
+            k_resume = make_cursor_key("openalex", "q_resume", from_year)
             store.update(k_done, None, exhausted=True)
             store.update(k_resume, "cursor_p2", exhausted=False)
 
-            reloaded = Step1CursorStore(state_path)
+            reloaded = Step1CursorStore(ctx.step1_cursor_state_path)
             self.assertEqual(reloaded.get(k_done), (None, True))
             self.assertEqual(reloaded.get(k_resume), ("cursor_p2", False))
 
@@ -1360,7 +1409,7 @@ class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
                     "authorships": [{"author": {"display_name": "Alice"}}],
                 }
 
-            def _fake_oa_req(url, params):
+            def _fake_oa_req(url, params, **_kwargs):
                 seen_cursors.append(params["cursor"])
                 r = MagicMock()
                 r.json.return_value = {
@@ -1369,27 +1418,20 @@ class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
                 }
                 return r
 
-            with patch.object(s1, "STEP1_CURSOR_STATE_PATH", state_path), \
-                 patch.object(s1, "STEP1_OUTPUT", out_csv), \
-                 patch.object(s1, "SEARCH_QUERIES", ["q_done", "q_resume"]), \
-                 patch.object(s1, "MAX_RECORDS_PER_QUERY", 10), \
-                 patch.object(s1, "ENABLE_OPENALEX", True), \
-                 patch.object(s1, "ENABLE_SEMANTIC_SCHOLAR", False), \
-                 patch.object(s1, "ENABLE_EUROPEPMC_XML", False), \
-                 patch.object(s1, "request_with_retry", side_effect=_fake_oa_req), \
+            with patch.object(s1, "request_with_retry", side_effect=_fake_oa_req), \
                  patch.object(s1.time, "sleep"):
-                df = s1.run_search(append=True)
+                df = s1.run_search(append=True, ctx=ctx)
 
             # q_done was exhausted -> 0 API calls; q_resume started at cursor_p2 -> now exhausted
             self.assertEqual(seen_cursors, ["cursor_p2"])
             self.assertEqual(len(df), 1)
-            after = Step1CursorStore(state_path)
+            after = Step1CursorStore(ctx.step1_cursor_state_path)
             self.assertEqual(after.get(k_resume), (None, True))
 
             # OpenAlex HTTP 400 invalid cursor automatically falls back to "*"
             oa_fallback_cursors: list[str] = []
 
-            def _oa_400_then_ok(url, params):
+            def _oa_400_then_ok(url, params, **_kwargs):
                 oa_fallback_cursors.append(params["cursor"])
                 if params["cursor"] == "expired_cur":
                     raise s1.OpenAlexInvalidCursorError("expired")
@@ -1410,6 +1452,7 @@ class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
                     needs_backfill={},
                     start_cursor="expired_cur",
                     cursor_out=cbox,
+                    ctx=ctx,
                 )
             self.assertEqual(oa_fallback_cursors, ["expired_cur", "*"])
             self.assertEqual(len(recs), 1)
@@ -1446,31 +1489,109 @@ class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
                     needs_backfill={},
                     start_cursor="bad_epmc_cursor",
                     cursor_out=epmc_box,
+                    ctx=ctx,
                 )
             self.assertEqual(epmc_cursors, ["bad_epmc_cursor", "*"])
             self.assertEqual(len(epmc_recs), 1)
             self.assertEqual(epmc_box, {"next_cursor": None, "exhausted": True})
 
     def test_openalex_grouped_queries_reduction_and_s2_detection(self):
-        import config
         import semantic_scholar_fetcher as s2f
 
-        grouped_all = config.build_search_queries(["corrosion", "cmp_etch", "inhibitor", "solvent"], grouped=True)
-        expanded_all = config.build_search_queries(["corrosion", "cmp_etch", "inhibitor", "solvent"], grouped=False)
+        cu_ctx = config.build_metal_context("Cu")
+        grouped_all = config.build_search_queries(
+            ["corrosion", "cmp_etch", "inhibitor", "solvent"],
+            target_metal=cu_ctx.target_metal,
+            metal_symbol=cu_ctx.metal_symbol,
+            compounds=cu_ctx.compounds,
+            cmp_queries=cu_ctx.cmp_queries,
+            inhibitor_queries=cu_ctx.inhibitor_queries,
+            grouped=True,
+        )
+        expanded_all = config.build_search_queries(
+            ["corrosion", "cmp_etch", "inhibitor", "solvent"],
+            target_metal=cu_ctx.target_metal,
+            metal_symbol=cu_ctx.metal_symbol,
+            compounds=cu_ctx.compounds,
+            cmp_queries=cu_ctx.cmp_queries,
+            inhibitor_queries=cu_ctx.inhibitor_queries,
+            grouped=False,
+        )
         self.assertLess(len(grouped_all), 25)
         self.assertGreater(len(expanded_all), 80)
         self.assertTrue(any(" AND " in q and " OR " in q for q in grouped_all))
 
         # S2 must recognize short grouped OpenAlex queries (e.g. solvent = 2 queries) and build S2 +/-/| queries
-        oa_solvent = config.build_search_queries(["solvent"], grouped=True)
+        oa_solvent = config.build_search_queries(
+            ["solvent"],
+            target_metal=cu_ctx.target_metal,
+            metal_symbol=cu_ctx.metal_symbol,
+            compounds=cu_ctx.compounds,
+            cmp_queries=cu_ctx.cmp_queries,
+            inhibitor_queries=cu_ctx.inhibitor_queries,
+            grouped=True,
+        )
         self.assertLessEqual(len(oa_solvent), 4)
         self.assertTrue(s2f._is_openalex_grouped_queries(oa_solvent))
-        s2_selected = s2f._select_s2_queries(oa_solvent, use_bulk=True)
+        s2_selected = s2f._select_s2_queries(oa_solvent, use_bulk=True, ctx=cu_ctx)
         self.assertTrue(all(" + " in q for q in s2_selected))
         self.assertFalse(any(" AND " in q for q in s2_selected))
 
+    def test_grouped_query_disambiguation_and_syntax_fixes(self):
+        import europepmc_fetcher as epmc
+        import semantic_scholar_fetcher as s2f
+
+        ru_ctx = config.build_metal_context("Ru")
+        tin_ctx = config.build_metal_context("TiN")
+
+        # 1. OpenAlex corrosion grouped queries must anchor Tafel slope/plot with AND "corrosion"
+        ru_oa_corr = config.build_grouped_openalex_queries(
+            ["corrosion"],
+            target_metal=ru_ctx.target_metal,
+            metal_symbol=ru_ctx.metal_symbol,
+            compounds=ru_ctx.compounds,
+        )
+        tafel_qs = [q for q in ru_oa_corr if '"Tafel slope"' in q]
+        self.assertEqual(len(tafel_qs), 1)
+        self.assertIn('AND "corrosion" AND', tafel_qs[0])
+
+        # 2. OpenAlex custom CMP/inhibitor queries must use explicit AND (no bare space-separated phrases inside OR)
+        ru_oa_cmp = config.build_grouped_openalex_queries(
+            ["cmp_etch", "inhibitor"],
+            target_metal=ru_ctx.target_metal,
+            metal_symbol=ru_ctx.metal_symbol,
+            cmp_queries=ru_ctx.cmp_queries,
+            inhibitor_queries=ru_ctx.inhibitor_queries,
+        )
+        self.assertTrue(any('"ruthenium" AND "CMP" AND "potentiodynamic polarization"' in q for q in ru_oa_cmp))
+        self.assertFalse(any('"ruthenium" "CMP"' in q for q in ru_oa_cmp))
+
+        # 3. TiN must be disambiguated from 'tin' (Sn) across OpenAlex, S2, and Europe PMC,
+        #    and bare "TiN" must not leak into compound batch queries
+        tin_oa_corr = config.build_grouped_openalex_queries(
+            ["corrosion"],
+            target_metal=tin_ctx.target_metal,
+            metal_symbol=tin_ctx.metal_symbol,
+            compounds=tin_ctx.compounds,
+        )
+        self.assertIn('("TiN" AND ("nitride"', tin_oa_corr[0])
+        compound_oa_qs = [q for q in tin_oa_corr if '"TiAlN"' in q or '"Ti2N"' in q]
+        self.assertTrue(compound_oa_qs)
+        self.assertFalse(any('("TiN" OR' in q or 'OR "TiN"' in q for q in compound_oa_qs))
+
+        tin_s2_corr = s2f.build_grouped_s2_queries(["corrosion"], ctx=tin_ctx)
+        self.assertIn('("TiN" + ("nitride"', tin_s2_corr[0])
+        self.assertNotIn('"Tafel slope"', tin_s2_corr[1])
+        self.assertFalse(tin_s2_corr[1].startswith('("TiN" |'))
+
+        # 4. Europe PMC query includes TiN disambiguation, compounds, and relaxed FROM_YEAR
+        tin_epmc = epmc.build_europepmc_query(["corrosion"], ctx=tin_ctx)
+        self.assertIn('("TiN" AND ("nitride"', tin_epmc)
+        self.assertIn('"TiAlN"', tin_epmc)
+        self.assertIn(f"PUB_YEAR:[{tin_ctx.settings.from_year} TO 2100]", tin_epmc)
+        self.assertEqual(tin_ctx.settings.from_year, 2000)
+
     def test_openalex_quota_exhausted_graceful_degradation_and_skip_flag(self):
-        import tempfile
         from unittest.mock import MagicMock, patch
         import europepmc_fetcher as epmc
         import run_all
@@ -1486,11 +1607,19 @@ class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
                 s1.request_with_retry(s1.BASE_URL, {"search": "test"})
 
         # 2. run_search gracefully degrades on OpenAlexQuotaExhaustedError:
-        #    saves partial OA records + resume cursor, writes batch marker, and still runs S2 + EPMC
+        #    saves partial OA records + resume cursor, updates oa_quota_state, and still runs S2 + EPMC
         with tempfile.TemporaryDirectory() as tmpdir:
-            out_csv = os.path.join(tmpdir, "cu_meta.csv")
-            state_path = os.path.join(tmpdir, "cu_cursor.json")
-            marker_path = os.path.join(tmpdir, "oa_quota.flag")
+            ctx = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                search_queries=["q1"],
+                max_records_per_query=10,
+                enable_openalex=True,
+                enable_semantic_scholar=True,
+                enable_europepmc_xml=True,
+            )
+            ctx.ensure_dirs()
+            quota_state = {"exhausted": False}
 
             def _fake_oa_fetch(q, max_records, **kwargs):
                 cbox = kwargs.get("cursor_out")
@@ -1526,47 +1655,499 @@ class TestStep1CursorGroupedAndQuotaDegradation(unittest.TestCase):
                 "doi": "https://doi.org/10.1000/epmc_only",
             }
 
-            with patch.dict(os.environ, {"TAFEL_OA_QUOTA_MARKER": marker_path}), \
-                 patch.object(s1, "STEP1_OUTPUT", out_csv), \
-                 patch.object(s1, "STEP1_CURSOR_STATE_PATH", state_path), \
-                 patch.object(s1, "SEARCH_QUERIES", ["q1"]), \
-                 patch.object(s1, "MAX_RECORDS_PER_QUERY", 10), \
-                 patch.object(s1, "ENABLE_OPENALEX", True), \
-                 patch.object(s1, "ENABLE_SEMANTIC_SCHOLAR", True), \
-                 patch.object(s1, "ENABLE_EUROPEPMC_XML", True), \
-                 patch.object(s1, "fetch_single_query", side_effect=_fake_oa_fetch), \
+            with patch.object(s1, "fetch_single_query", side_effect=_fake_oa_fetch), \
                  patch.object(s2f, "search_semantic_scholar", return_value=[fake_s2_rec]) as mock_s2, \
                  patch.object(epmc, "search_europepmc_metadata", return_value=[fake_epmc_rec]) as mock_epmc:
-                df = s1.run_search(append=True)
+                df = s1.run_search(append=True, ctx=ctx, oa_quota_state=quota_state)
 
             self.assertEqual(mock_s2.call_count, 1)
             self.assertEqual(mock_epmc.call_count, 1)
-            self.assertTrue(os.path.exists(marker_path))
-            self.assertTrue(os.path.exists(out_csv))
+            self.assertTrue(quota_state["exhausted"])
+            self.assertTrue(os.path.exists(ctx.step1_output))
             self.assertEqual(len(df), 2)
             # Mid-query cursor was preserved
-            saved_store = Step1CursorStore(state_path)
+            saved_store = Step1CursorStore(ctx.step1_cursor_state_path)
             self.assertEqual(
-                saved_store.get(make_cursor_key("openalex", "q1", s1.FROM_YEAR)),
+                saved_store.get(make_cursor_key("openalex", "q1", ctx.settings.from_year)),
                 ("saved_mid_cursor", False),
             )
 
             # 3. skip_openalex=True skips OA completely and still runs S2
-            with patch.object(s1, "STEP1_OUTPUT", out_csv), \
-                 patch.object(s1, "STEP1_CURSOR_STATE_PATH", state_path), \
-                 patch.object(s1, "SEARCH_QUERIES", ["q1"]), \
-                 patch.object(s1, "ENABLE_OPENALEX", True), \
-                 patch.object(s1, "ENABLE_SEMANTIC_SCHOLAR", True), \
-                 patch.object(s1, "ENABLE_EUROPEPMC_XML", False), \
-                 patch.object(s1, "fetch_single_query") as mock_oa_skip, \
+            ctx_no_epmc = _make_test_ctx(
+                tmpdir,
+                "Cu",
+                search_queries=["q1"],
+                enable_openalex=True,
+                enable_semantic_scholar=True,
+                enable_europepmc_xml=False,
+            )
+            with patch.object(s1, "fetch_single_query") as mock_oa_skip, \
                  patch.object(s2f, "search_semantic_scholar", return_value=[fake_s2_rec]):
-                s1.run_search(append=True, skip_openalex=True)
+                s1.run_search(append=True, skip_openalex=True, ctx=ctx_no_epmc)
             self.assertEqual(mock_oa_skip.call_count, 0)
 
         # 4. CLI --skip-openalex flag
         parser = run_all.build_cli_parser()
         parsed = parser.parse_args(["WN", "--append", "--skip-openalex"])
         self.assertTrue(parsed.skip_openalex)
+
+
+class TestRunContextIsolationAndBatchExecution(unittest.TestCase):
+    def test_config_import_has_no_side_effects(self):
+        import subprocess
+        import sys
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        clean_env = os.environ.copy()
+        for key in ("OPENALEX_API_KEY", "SEMANTIC_SCHOLAR_API_KEY", "MP_API_KEY"):
+            clean_env.pop(key, None)
+        clean_env["TAFEL_METAL"] = "INVALID_METAL_SHOULD_BE_IGNORED"
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, config, step6_merge, step7_enrich_data, run_all; "
+                    "assert not os.environ.get('OPENALEX_API_KEY'); "
+                    "assert not os.environ.get('SEMANTIC_SCHOLAR_API_KEY'); "
+                    "assert not os.environ.get('MP_API_KEY'); "
+                    "import auto_run"
+                ),
+            ],
+            cwd=repo_root,
+            env=clean_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(proc.stdout.strip(), "")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = _make_test_ctx(tmpdir, "Co")
+            self.assertFalse(os.path.exists(ctx.data_dir))
+            ctx.ensure_dirs()
+            self.assertTrue(os.path.isdir(ctx.metadata_dir))
+            self.assertTrue(os.path.isdir(ctx.extracted_dir))
+
+    def test_independent_metal_contexts_do_not_leak(self):
+        from step5_text_extractor import assign_material, find_materials
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cu_ctx = _make_test_ctx(tmpdir, "Cu")
+            co_ctx = _make_test_ctx(tmpdir, "Co")
+
+            self.assertNotEqual(cu_ctx.step1_output, co_ctx.step1_output)
+            self.assertNotEqual(cu_ctx.s2_cache_path, co_ctx.s2_cache_path)
+            self.assertNotEqual(cu_ctx.step5_echem_output, co_ctx.step5_echem_output)
+            self.assertTrue(cu_ctx.target_regex.search("Cu3P electrode"))
+            self.assertFalse(co_ctx.target_regex.search("Cu3P electrode"))
+
+            cu_hits = [sym for _, sym in find_materials("Potentiodynamic polarization of Cu3P electrode", ctx=cu_ctx)]
+            co_hits = [sym for _, sym in find_materials("Potentiodynamic polarization of cobalt foil", ctx=co_ctx)]
+            self.assertIn("Cu", cu_hits)
+            self.assertIn("Co", co_hits)
+
+            mat_co, _ = assign_material(["cobalt foil in acid"], Counter({"Co": 5}), ctx=co_ctx)
+            mat_cu, _ = assign_material(["Cu3P electrode in acid"], Counter({"Cu": 5}), ctx=cu_ctx)
+            self.assertEqual(mat_co, "Co")
+            self.assertEqual(mat_cu, "Cu")
+
+    def test_run_batch_error_isolation_and_in_memory_oa_quota(self):
+        from unittest.mock import patch
+        import run_all
+        import step1_search_openalex as s1
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = config.load_settings(
+                data_root=tmpdir,
+                skip_existing_step1=False,
+                enable_openalex=True,
+            )
+
+            seen_calls: list[tuple[str, bool, bool]] = []
+
+            def _fake_search(*, append=False, skip_openalex=False, ctx=None, oa_quota_state=None):
+                seen_calls.append((ctx.metal_symbol, skip_openalex, ctx.enable_openalex))
+                if ctx.metal_symbol == "Cu":
+                    oa_quota_state["exhausted"] = True
+                return pd.DataFrame()
+
+            with patch.object(s1, "run_search", side_effect=_fake_search):
+                rc = run_all.run_batch(
+                    ["Cu", "Co"],
+                    from_step=1,
+                    to_step=1,
+                    no_merge=True,
+                    no_enrich=True,
+                    settings=settings,
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                seen_calls,
+                [
+                    ("Cu", False, True),
+                    ("Co", True, False),
+                ],
+            )
+
+            # Error in first metal must not abort the second metal
+            executed: list[str] = []
+
+            def _failing_then_ok(*, append=False, skip_openalex=False, ctx=None, oa_quota_state=None):
+                executed.append(ctx.metal_symbol)
+                if ctx.metal_symbol == "Cu":
+                    raise RuntimeError("boom")
+                return pd.DataFrame()
+
+            with patch.object(s1, "run_search", side_effect=_failing_then_ok):
+                rc_err = run_all.run_batch(
+                    ["Cu", "Co"],
+                    from_step=1,
+                    to_step=1,
+                    no_merge=True,
+                    no_enrich=True,
+                    settings=settings,
+                )
+            self.assertEqual(rc_err, 1)
+            self.assertEqual(executed, ["Cu", "Co"])
+
+            # Invalid metal symbol inside build_metal_context must also be isolated
+            executed_after_invalid: list[str] = []
+
+            def _record_ok(*, append=False, skip_openalex=False, ctx=None, oa_quota_state=None):
+                executed_after_invalid.append(ctx.metal_symbol)
+                return pd.DataFrame()
+
+            with patch.object(s1, "run_search", side_effect=_record_ok):
+                rc_invalid = run_all.run_batch(
+                    ["INVALID_METAL", "Co"],
+                    from_step=1,
+                    to_step=1,
+                    no_merge=True,
+                    no_enrich=True,
+                    settings=settings,
+                )
+            self.assertEqual(rc_invalid, 1)
+            self.assertEqual(executed_after_invalid, ["Co"])
+
+    def test_step6_discover_complete_metals_and_no_global_mutation(self):
+        from pathlib import Path
+        import step6_merge
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cu_ext = root / "Cu" / "extracted"
+            co_ext = root / "Co" / "extracted"
+            cu_ext.mkdir(parents=True)
+            co_ext.mkdir(parents=True)
+
+            for suffix in step6_merge.REQUIRED_SUFFIXES:
+                (cu_ext / f"cu_{suffix}").write_text("col\n", encoding="utf-8")
+            (co_ext / "co_material_properties.csv").write_text("col\n", encoding="utf-8")
+
+            self.assertEqual(step6_merge.discover_complete_metals(root), ["Cu"])
+
+        recs = [
+            {
+                "is_target_metal": False,
+                "material_id_assigned": "Co",
+                "source_id": "10.1000_cross",
+                "record_electrolytes": [{"conc": "0.5", "unit": "M", "species": "H2SO4"}],
+                "record_ph": 1.0,
+                "record_temp": 25.0,
+            }
+        ]
+        sol_df = build_solution_properties(recs, keep_only_target=False, target_symbol="")
+        self.assertEqual(len(sol_df), 1)
+        self.assertEqual(sol_df.loc[0, "materials"], "Co")
+
+
+class TestStep5SchemaAndParity(unittest.TestCase):
+    def test_text_extraction_context_she_and_tafel_bounds(self):
+        from step5_constants import convert_to_she, normalize_text
+        from step5_text_extractor import (
+            count_materials,
+            extract_from_text,
+            extract_paper_environment,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = _make_test_ctx(tmpdir, "Cu")
+            # Paper-wide majority is SCE and pH 7.0 in methods, while the measurement
+            # sentence >350 chars away uses RHE at pH 3.0.
+            filler = " " + ("Electrochemical impedance and morphology characterization were performed. " * 6)
+            paper_text = (
+                "Electrochemical tests generally used a SCE reference electrode at pH 7.0. "
+                "Control runs were also measured vs SCE at pH 7.0 in 0.5 M NaCl."
+                + filler
+                + "For pure copper in 0.5 M H2SO4 at pH 3.0, Ecorr = -0.10 V vs. RHE, "
+                "icorr = 15 uA/cm2, ba = 600 mV/dec, bc = 120 mV/dec."
+            )
+            norm_text = normalize_text(paper_text)
+            paper_counts = count_materials(norm_text, ctx=ctx)
+            paper_environment = extract_paper_environment(norm_text, norm_text)
+            recs = extract_from_text(
+                norm_text,
+                "10.1000_parity",
+                paper_counts=paper_counts,
+                ctx=ctx,
+                paper_environment=paper_environment,
+            )
+
+            self.assertGreaterEqual(len(recs), 1)
+            rhe_rec = next(r for r in recs if r.get("Ecorr_V_original") == -0.10)
+            expected_she = convert_to_she(-0.10, "RHE", 3.0)
+            self.assertAlmostEqual(rhe_rec["Ecorr_V_SHE"], expected_she, places=4)
+            self.assertEqual(rhe_rec["beta_a_mV_dec"], 600.0)
+            self.assertEqual(rhe_rec["beta_c_mV_dec"], 120.0)
+            self.assertIn("exceeds TAFEL_MAX", rhe_rec["extra_quality_notes"])
+
+            # Separate paper with out-of-bounds Tafel slopes (< TAFEL_MIN and > 1000)
+            # Also verify plain-dict compatibility on extract_from_text(paper_environment=...)
+            oob_text = normalize_text(
+                "For pure copper in 0.5 M H2SO4 at pH 3.0, Ecorr = -0.20 V vs. SCE, "
+                "icorr = 20 uA/cm2, ba = 5 mV/dec, bc = 2500 mV/dec."
+            )
+            oob_counts = count_materials(oob_text, ctx=ctx)
+            oob_recs = extract_from_text(
+                oob_text,
+                "10.1000_oob",
+                paper_counts=oob_counts,
+                ctx=ctx,
+                paper_environment={"refs": ["SCE"], "ref_counts": {"SCE": 1}},
+            )
+            self.assertGreaterEqual(len(oob_recs), 1)
+            oob_rec = oob_recs[0]
+            self.assertIsNone(oob_rec["beta_a_mV_dec"])
+            self.assertIsNone(oob_rec["beta_c_mV_dec"])
+
+    def test_paper_environment_survives_empty_text_records(self):
+        import json
+        from step5_constants import convert_to_she, normalize_text
+        from step5_table_extractor import extract_from_tables, extract_table_captions
+        from step5_text_extractor import (
+            count_materials,
+            extract_from_text,
+            extract_paper_environment,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = _make_test_ctx(tmpdir, "Cu")
+            body = (
+                "A polished copper thin film electrode was evaluated by potentiodynamic "
+                "polarization in deaerated 0.5 M H2SO4 (pH 1.0) at 25 °C using a SCE "
+                "reference electrode. Table 1 summarizes the electrochemical parameters "
+                "for Cu in 0.5 M H2SO4."
+            )
+            norm_text = normalize_text(body)
+            paper_counts = count_materials(norm_text, ctx=ctx)
+            paper_environment = extract_paper_environment(
+                norm_text,
+                norm_text,
+                table_captions=extract_table_captions(norm_text),
+            )
+            text_records = extract_from_text(
+                norm_text,
+                "10.1000_table_only",
+                paper_counts=paper_counts,
+                ctx=ctx,
+                paper_environment=paper_environment,
+            )
+            self.assertEqual(text_records, [])
+
+            table_path = os.path.join(tmpdir, "10.1000_table_only_tables.json")
+            tables_payload = [
+                [
+                    [
+                        "Sample",
+                        "Ecorr (mV vs SCE)",
+                        "icorr (uA/cm2)",
+                        "ba (mV/dec)",
+                        "bc (mV/dec)",
+                    ],
+                    ["Bare Cu", "-200", "25", "80", "110"],
+                ]
+            ]
+            with open(table_path, "w", encoding="utf-8") as f:
+                json.dump(tables_payload, f)
+
+            table_records = extract_from_tables(
+                table_path,
+                "10.1000_table_only",
+                paper_counts=paper_counts,
+                paper_environment=paper_environment,
+                ctx=ctx,
+            )
+            self.assertEqual(len(table_records), 1)
+            rec = table_records[0]
+            self.assertIn("thin film", rec["metal_form"] or "")
+            self.assertIn("polished", rec["surface_preparation"] or "")
+            self.assertTrue(rec["deaerated"])
+            self.assertIn("potentiodynamic", rec["measurement_methods"] or "")
+            self.assertAlmostEqual(
+                rec["Ecorr_V_SHE"],
+                convert_to_she(-0.200, "SCE", 1.0),
+                places=4,
+            )
+
+    def test_chemical_species_registry_single_source_derivation(self):
+        import json
+        from step5_schema import load_chemical_species_registry
+
+        default_reg = load_chemical_species_registry()
+        self.assertEqual(default_reg.normalise("benzotriazole"), "BTA")
+        self.assertEqual(default_reg.lookup_category("BTA")["role"], "inhibitor")
+        self.assertIn("O3", default_reg.species_categories)
+        self.assertNotIn("O3", default_reg.electrolyte_species)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom_path = os.path.join(tmpdir, "custom_species.json")
+            custom_data = {
+                "role_fields": {
+                    "acid": "acids",
+                    "inhibitor": "inhibitors",
+                },
+                "species": [
+                    {"canonical": "HCl", "role": "acid", "aliases": ["hydrochloric acid"]},
+                    {
+                        "canonical": "MyNewInh",
+                        "role": "inhibitor",
+                        "aliases": ["my new inhibitor"],
+                    },
+                ],
+            }
+            with open(custom_path, "w", encoding="utf-8") as f:
+                json.dump(custom_data, f)
+
+            reg = load_chemical_species_registry(custom_path)
+            self.assertEqual(reg.normalise("my new inhibitor"), "MyNewInh")
+            self.assertEqual(
+                reg.lookup_category("MyNewInh"),
+                {"role": "inhibitor", "field": "inhibitors"},
+            )
+            self.assertIn("MyNewInh", reg.electrolyte_species)
+            self.assertIn("my new inhibitor", reg.electrolyte_species)
+            import re as _re
+            el_m = _re.search(reg.electrolyte_species_regex, "0.5 M my new inhibitor", _re.I)
+            self.assertIsNotNone(el_m)
+            self.assertEqual(el_m.group(0).lower(), "my new inhibitor")
+            m = reg.inhibitor_name_pattern.search("Cu in HCl with 1 mM my new inhibitor")
+            self.assertIsNotNone(m)
+            self.assertEqual(m.group("inh").lower(), "my new inhibitor")
+
+            # Custom JSON with zero inhibitors must not match empty strings
+            no_inh_path = os.path.join(tmpdir, "no_inhibitors.json")
+            with open(no_inh_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "role_fields": {"acid": "acids"},
+                        "species": [{"canonical": "HCl", "role": "acid"}],
+                    },
+                    f,
+                )
+            no_inh_reg = load_chemical_species_registry(no_inh_path)
+            self.assertIsNone(no_inh_reg.inhibitor_name_pattern.search("Cu in 1 M HCl"))
+
+    def test_step5_run_extract_end_to_end_csv_schema(self):
+        import json
+        import step5_extract_data as s5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = _make_test_ctx(tmpdir, "Cu")
+            ctx.ensure_dirs()
+
+            txt_path = os.path.join(ctx.text_dir, "10.1000_e2e.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "Polished copper thin film was tested by potentiodynamic polarization "
+                    "in deaerated 0.5 M H2SO4 (pH 1.0) at 25 °C vs. SCE. "
+                    "Table 1 shows the Tafel polarization parameters for Cu."
+                )
+
+            tables_path = os.path.join(ctx.text_dir, "10.1000_e2e_tables.json")
+            with open(tables_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    [
+                        [
+                            [
+                                "Sample",
+                                "Ecorr (mV vs SCE)",
+                                "icorr (uA/cm2)",
+                                "ba (mV/dec)",
+                                "bc (mV/dec)",
+                            ],
+                            ["Pure Cu", "-180", "18.5", "75", "115"],
+                        ]
+                    ],
+                    f,
+                )
+
+            s5.run_extract(ctx=ctx)
+
+            for out_path in (
+                ctx.step5_material_output,
+                ctx.step5_solution_output,
+                ctx.step5_echem_output,
+                ctx.step5_raw_output,
+                ctx.step5_outliers_output,
+            ):
+                self.assertTrue(os.path.exists(out_path), f"Missing output: {out_path}")
+
+            mat_df = pd.read_csv(ctx.step5_material_output)
+            sol_df = pd.read_csv(ctx.step5_solution_output)
+            echem_df = pd.read_csv(ctx.step5_echem_output)
+            raw_df = pd.read_csv(ctx.step5_raw_output)
+
+            self.assertEqual(len(echem_df), 1)
+            self.assertEqual(len(raw_df), 1)
+            self.assertGreaterEqual(len(mat_df), 1)
+            self.assertGreaterEqual(len(sol_df), 1)
+
+            for col in (
+                "record_id",
+                "material_id",
+                "solution_id",
+                "Ecorr_V_SHE",
+                "icorr_uA_cm2",
+                "beta_a_mV_dec",
+                "beta_c_mV_dec",
+                "pH",
+                "temperature_C",
+                "aeration_condition",
+                "data_quality_score",
+            ):
+                self.assertIn(col, echem_df.columns)
+
+            for col in ("solution_id", "solution_name", "solution_category", "components_json"):
+                self.assertIn(col, sol_df.columns)
+
+            for col in (
+                "material_id",
+                "material_name",
+                "symbol",
+                "category",
+                "density_g_cm3",
+                "standard_potential_V_SHE",
+            ):
+                self.assertIn(col, mat_df.columns)
+
+            for col in (
+                "source_id",
+                "material_id_assigned",
+                "solution_id_assigned",
+                "Ecorr_V_SHE",
+                "icorr_uA_cm2",
+                "beta_a_mV_dec",
+                "beta_c_mV_dec",
+                "extraction_method",
+            ):
+                self.assertIn(col, raw_df.columns)
+
+            self.assertEqual(echem_df.loc[0, "material_id"], "Cu")
+            self.assertEqual(echem_df.loc[0, "aeration_condition"], "deaerated")
+            self.assertEqual(echem_df.loc[0, "beta_a_mV_dec"], 75.0)
+            self.assertEqual(echem_df.loc[0, "beta_c_mV_dec"], 115.0)
 
 
 if __name__ == "__main__":

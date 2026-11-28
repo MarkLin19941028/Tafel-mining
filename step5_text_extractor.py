@@ -5,26 +5,25 @@ Step 5 — Regex patterns, environment/material/solution helpers, and text extra
 import hashlib
 import re
 from collections import Counter, OrderedDict
+from functools import lru_cache
 
 import numpy as np
 
-from config import (
-    CONTEXT_WINDOW,
-    METAL_SYMBOL,
-    MIN_MATERIAL_MENTIONS,
-    TAFEL_MAX,
-    TAFEL_MIN,
-    TARGET_METAL,
-    build_target_regex,
-)
+import config
 from step5_constants import (
     KNOWN_MATERIALS,
     convert_log_icorr_to_uA_cm2,
-    convert_to_she,
     normalize_ecorr_to_v,
     normalize_icorr_to_uA_cm2,
     normalize_text,
     parse_scientific,
+)
+from step5_schema import (
+    PaperEnvironment,
+    RawEchemRecord,
+    load_chemical_species_registry,
+    normalize_tafel_slope,
+    resolve_ecorr_she,
 )
 
 # ====================================================================
@@ -66,44 +65,11 @@ TAFEL_CATHODIC_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# 依長度由長到短排列，避免 NaCl 截斷 NaClO4、HCl 截斷 HClO4
-_ELECTROLYTE_SPECIES = sorted([
-    # --- 酸 / 鹼 / 氧化劑 / 緩衝液 / 有機溶劑 / 螯合劑 ---
-    "tetramethylammonium hydroxide", "ammonium hydroxide", "hydrogen peroxide",
-    "hydrofluoric acid", "phosphate buffer", "borate buffer", "ethylene glycol",
-    "citric acid", "oxalic acid", "acetic acid", "malic acid", "tartaric acid",
-    "isopropanol", "(NH4)2S2O8", "Fe(NO3)3", "K3Fe(CN)6", "K4Fe(CN)6",
-    "K2S2O8", "Na2S2O8", "Na2B4O7", "Na2HPO4", "KH2PO4", "K2HPO4", "NaH2PO4",
-    "NaHCO3", "KHCO3", "NaClO4", "Na2SO4", "Na2CO3", "K2SO4", "K2CO3",
-    "H2SO4", "H₂SO₄", "HClO4", "H3PO4", "NH4OH", "NH₄OH", "CuSO4", "CuCl2",
-    "FeCl3", "KIO4", "KIO3", "NaClO", "H2O2", "H₂O₂", "HNO3", "NaOH", "NaCl",
-    "KNO3", "NaNO3", "LiOH", "TMAH", "EDTA", "DMSO", "glycine",
-    "KOH", "HCl", "KCl", "PBS", "IPA", "NMP", "HF", "EG",
-    # --- 多樣化腐蝕與 CMP 緩蝕劑（唑類、雜環、含硫氮、胺基酸、界面活性劑、高分子、無機鹽）---
-    "5-mercapto-1-phenyl-1H-tetrazole", "5-mercapto-1-phenyltetrazole",
-    "sodium dodecylbenzenesulfonate", "cetyltrimethylammonium bromide",
-    "3-amino-1,2,4-triazole", "2-mercaptobenzothiazole", "2-mercaptobenzimidazole",
-    "hexamethylenetetramine", "sodium dodecyl sulfate", "polyvinylpyrrolidone",
-    "polyethylene glycol", "polyethyleneimine", "8-hydroxyquinoline",
-    "thiosemicarbazide", "5-aminotetrazole", "monoethanolamine",
-    "potassium oleate", "polyacrylic acid", "1,3,4-thiadiazole",
-    "sodium molybdate", "sodium silicate", "sodium tungstate", "sodium benzoate",
-    "1,2,4-triazole", "aminotetrazole", "benzotriazole", "tolyltriazole",
-    "benzimidazole", "sodium oleate", "sodium nitrite", "glutamic acid",
-    "aspartic acid", "L-tryptophan", "Triton X-100", "L-methionine",
-    "L-histidine", "L-cysteine", "L-arginine", "tryptophan", "methionine",
-    "urotropine", "L-alanine", "histidine", "imidazole", "Ce(NO3)3",
-    "L-lysine", "cysteine", "thiourea", "pyrazole", "thiazole", "pyridine",
-    "Tween-80", "Tween 80", "arginine", "K2Cr2O7", "Na2MoO4", "Na2SiO3",
-    "Na2WO4", "adenine", "guanine", "alanine", "purine", "lysine",
-    "CeCl3", "NaNO2", "5-AT", "8-HQ", "CTAB", "DTAB", "HMTA", "SDBS",
-    "BTA", "TTA", "TAZ", "ATA", "MBI", "MBT", "MPT", "BIA", "MEA",
-    "SDS", "PEG", "PEI", "PAA", "PVP", "TU",
-], key=len, reverse=True)
-
-_SPECIES_REGEX = "|".join(
-    re.escape(s).replace(r"\ ", r"\s+") for s in _ELECTROLYTE_SPECIES
-)
+# 化學物種統一由 chemical_species.json 衍生（依長度由長到短排列，避免 NaCl 截斷 NaClO4）
+_SPECIES_REGISTRY = load_chemical_species_registry()
+_ELECTROLYTE_SPECIES = list(_SPECIES_REGISTRY.electrolyte_species)
+_SPECIES_REGEX = _SPECIES_REGISTRY.electrolyte_species_regex
+SPECIES_CATEGORIES = _SPECIES_REGISTRY.species_categories
 
 # 單位中 M / mM / µM 區分大小寫，避免 10 m (公尺/分鐘) 被誤判成 10 M
 ELECTROLYTE_PATTERN = re.compile(
@@ -139,16 +105,33 @@ def normalise_ref_electrode(raw: str) -> str:
     """將不同寫法的參考電極統一標準名稱。"""
     s = re.sub(r"\s+", " ", normalize_text(raw or "")).strip()
     low = s.lower()
-    if "ag" in low and "agcl" in low:
+    compact = re.sub(r"[\s/\\|\-–—ǁ‖:]+", "", low)
+    if ("ag" in low and "agcl" in low) or ("silver" in low and "chloride" in low):
         return "Ag/AgCl"
-    if "sce" in low or "calomel" in low:
+    if (
+        "sce" in low
+        or "calomel" in low
+        or "kalmel" in low
+        or "hghg2cl2" in compact
+        or "hghgcl" in compact
+    ):
         return "SCE"
-    if "hg/hgo" in low.replace(" ", ""):
+    if "hghgo" in compact or ("mercury" in low and "oxide" in low):
         return "Hg/HgO"
-    if "hg2so4" in low.replace(" ", "") or "mercury" in low and "sulfate" in low:
+    if (
+        "hg2so4" in compact
+        or "hgso4" in compact
+        or ("mercur" in low and "sulfate" in low)
+        or "smse" in low
+        or "mms" in low
+        or "sse" in low
+        or ("saturated" in low and "sulfate" in low)
+    ):
         return "Hg/Hg2SO4"
     if "mse" in low:
         return "MSE"
+    if "cuso4" in compact or ("copper" in low and "sulfate" in low) or "cse" in low:
+        return "Cu/CuSO4"
     if "rhe" in low or "reversible hydrogen" in low:
         return "RHE"
     if "she" in low or "nhe" in low or "standard hydrogen" in low or "normal hydrogen" in low:
@@ -157,9 +140,13 @@ def normalise_ref_electrode(raw: str) -> str:
 
 
 def extract_ref_electrodes(text: str) -> Counter:
-    """依出現次數統計參考電極（去除參考文獻，確保順序確定性）。"""
+    """依出現次數統計參考電極（合併 PDF 斷行連字，確保順序確定性）。"""
     counts: Counter = Counter()
-    for m in REF_ELECTRODE_PATTERN.finditer(text):
+    if not text:
+        return counts
+    cleaned = re.sub(r"-\s*\n\s*", "", text)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    for m in REF_ELECTRODE_PATTERN.finditer(cleaned):
         norm = normalise_ref_electrode(m.group("ref"))
         if norm:
             counts[norm] += 1
@@ -179,13 +166,33 @@ def select_ref_electrode(contexts: list[str], paper_ref_counts: Counter) -> str 
 
 REF_ELECTRODE_PATTERN = re.compile(
     r"(?P<ref>"
-    r"Ag\s*[/|]\s*AgCl\s*\([^)]*\)|Ag\s*[/|]\s*AgCl"
-    r"|\bSCE\b|saturated\s+calomel"
-    r"|Hg\s*[/|]\s*HgO"
-    r"|Hg\s*[/|]\s*Hg[2₂]SO[4₄]"
-    r"|\bRHE\b|reversible\s+hydrogen"
-    r"|\bSHE\b|\bNHE\b|standard\s+hydrogen|normal\s+hydrogen"
-    r"|\bMSE\b|mercury\s*[\-/]?\s*sulfate"
+    # Ag/AgCl variants: separators (-, /, |, ǁ, ‖, :), reversed AgCl/Ag, full English names
+    r"Ag\s*[/|\\\-–—ǁ‖:]\s*AgCl(?:\s*\([^)]*\))?"
+    r"|AgCl\s*[/|\\\-–—ǁ‖:]\s*Ag(?:\s*\([^)]*\))?"
+    r"|silver[\s/\-–—]+silver[\s\-]+chloride(?:\s+(?:reference\s+)?electrode)?"
+    r"|silver\s+chloride\s+(?:reference\s+)?electrode"
+    # SCE / Calomel variants: glued units (VSCE, mVSCE), calomel without 'saturated', Hg/Hg2Cl2
+    r"|(?:(?<=[\s(/\[,;:])|(?<=mV)|(?<=V)|(?<=vs\.)|(?<=vs)|^)SCE\b"
+    r"|saturated\s+(?:calomel|kalmel)(?:\s+(?:reference\s+)?electrode)?"
+    r"|(?:calomel|kalmel)\s+(?:reference\s+)?electrode"
+    r"|Hg\s*[/|\\\-–—ǁ‖:]\s*Hg[2₂]\s*Cl[2₂]"
+    # Hg/HgO variants
+    r"|Hg\s*[/|\\\-–—ǁ‖:]\s*HgO|mercury[\s/\-–—]+mercur(?:ic|ous)\s+oxide"
+    # Hg/Hg2SO4 / MSE / SMSE / MMS / context-guarded SSE
+    r"|Hg\s*[/|\\\-–—ǁ‖:]\s*Hg[2₂]\s*SO[4₄]"
+    r"|mercur(?:y|ous)[\s/\-–—]+(?:mercurous\s+)?sulfate"
+    r"|saturated\s+(?:mercurous\s+)?sulfate\s+(?:reference\s+)?electrode"
+    r"|\b(?:MSE|SMSE|MMS)\b"
+    r"|(?:(?<=vs\. )|(?<=vs )|(?<=reference electrode \())SSE\b"
+    r"|\bSSE\b(?=\s+(?:reference|electrode))"
+    # Cu/CuSO4 / context-guarded CSE
+    r"|Cu\s*[/|\\\-–—ǁ‖:]\s*CuSO[4₄]"
+    r"|copper[\s/\-–—]+(?:copper\s+)?sulfate\s+(?:reference\s+)?electrode"
+    r"|(?:(?<=vs\. )|(?<=vs )|(?<=reference electrode \())CSE\b"
+    r"|\bCSE\b(?=\s+(?:reference|electrode))"
+    # RHE / SHE / NHE (including glued units like VRHE, VSHE, mVSHE)
+    r"|(?:(?<=[\s(/\[,;:])|(?<=mV)|(?<=V)|(?<=vs\.)|(?<=vs)|^)(?:RHE|SHE|NHE)\b"
+    r"|(?:reversible|standard|normal)\s+hydrogen(?:\s+(?:reference\s+)?electrode)?"
     r")",
     re.IGNORECASE,
 )
@@ -285,25 +292,45 @@ IMMERSION_TIME_PATTERN = re.compile(
 
 from materials_loader import build_text_recognition_tables
 
-_BASE_SYMBOLS, _NAME_TO_SYMBOL, _MATERIAL_ALIASES = build_text_recognition_tables()
-# 目標金屬一定要能被辨識（例如未來切換成其他金屬時）
-_NAME_TO_SYMBOL.setdefault(TARGET_METAL.lower(), METAL_SYMBOL)
+_BASE_SYMBOLS, _BASE_NAME_TO_SYMBOL, _MATERIAL_ALIASES = build_text_recognition_tables()
 
-_ALL_SYMBOLS = sorted(
-    set(_BASE_SYMBOLS) | set(KNOWN_MATERIALS.keys()) | {METAL_SYMBOL, "WN", "MoN"},
-    key=len, reverse=True,          # 長的先比對：TiN / MoN 先於 Ti / Mo
-)
 
-SYMBOL_PATTERN = re.compile(
-    r"(?<![A-Za-z])(?P<sym>" + "|".join(map(re.escape, _ALL_SYMBOLS)) + r")(?![a-z])"
-)
-NAME_PATTERN = re.compile(
-    r"\b(?P<name>" + "|".join(
-        map(re.escape, sorted(_NAME_TO_SYMBOL, key=len, reverse=True))
-    ) + r")\b",
-    re.IGNORECASE | re.ASCII,
-)
-TARGET_PATTERN = build_target_regex()
+def _resolve_ctx(ctx: config.MetalRunContext | None) -> config.MetalRunContext:
+    return ctx if ctx is not None else config.default_metal_context()
+
+
+def _name_to_symbol_for(target_metal: str, metal_symbol: str) -> dict[str, str]:
+    mapping = dict(_BASE_NAME_TO_SYMBOL)
+    mapping.setdefault(target_metal.lower(), metal_symbol)
+    return mapping
+
+
+def _known_symbols_for(metal_symbol: str) -> list[str]:
+    return sorted(
+        set(_BASE_SYMBOLS) | set(KNOWN_MATERIALS.keys()) | {metal_symbol, "WN", "MoN"},
+        key=len,
+        reverse=True,
+    )
+
+
+@lru_cache(maxsize=32)
+def _compile_material_patterns(
+    target_metal: str,
+    metal_symbol: str,
+) -> tuple[dict[str, str], re.Pattern, re.Pattern]:
+    name_to_symbol = _name_to_symbol_for(target_metal, metal_symbol)
+    all_symbols = _known_symbols_for(metal_symbol)
+    symbol_pat = re.compile(
+        r"(?<![A-Za-z])(?P<sym>" + "|".join(map(re.escape, all_symbols)) + r")(?![a-z])"
+    )
+    name_pat = re.compile(
+        r"\b(?P<name>" + "|".join(
+            map(re.escape, sorted(name_to_symbol, key=len, reverse=True))
+        ) + r")\b",
+        re.IGNORECASE | re.ASCII,
+    )
+    return name_to_symbol, symbol_pat, name_pat
+
 
 # 參考電極 / 對電極造成的雜訊：Ag/AgCl、Pt counter electrode、Pt wire ...
 _AUX_ELECTRODE_AFTER = re.compile(
@@ -330,22 +357,31 @@ def _is_noise(sym: str, text: str, start: int, end: int) -> bool:
     return False
 
 
-def find_materials(text: str) -> list[tuple[str, str]]:
+def find_materials(
+    text: str,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> list[tuple[str, str]]:
     """回傳 [(原始字串, 標準化符號), ...]，依出現順序。"""
+    resolved_ctx = _resolve_ctx(ctx)
+    name_to_symbol, symbol_pat, name_pat = _compile_material_patterns(
+        resolved_ctx.target_metal,
+        resolved_ctx.metal_symbol,
+    )
     found = []
-    for m in NAME_PATTERN.finditer(text):
+    for m in name_pat.finditer(text):
         raw = m.group("name")
-        sym = _NAME_TO_SYMBOL.get(raw.lower())
+        sym = name_to_symbol.get(raw.lower())
         if sym:
             found.append((m.start(), -len(raw), 0, raw, sym))
-    for m in SYMBOL_PATTERN.finditer(text):
+    for m in symbol_pat.finditer(text):
         sym = m.group("sym")
         if not _is_noise(sym, text, m.start(), m.end()):
             found.append((m.start(), -len(sym), 0, sym, sym))
-    # 目標金屬的化合物（config.COMPOUNDS，例如 copper foam、Cu3P、W2N thin film）
-    for m in TARGET_PATTERN.finditer(text):
+    # 目標金屬的化合物（ctx.compounds，例如 copper foam、Cu3P、W2N thin film）
+    for m in resolved_ctx.target_regex.finditer(text):
         raw = m.group(0)
-        found.append((m.start(), -len(raw), 1, raw, METAL_SYMBOL))
+        found.append((m.start(), -len(raw), 1, raw, resolved_ctx.metal_symbol))
     # 同一位置可能被多個 pattern 命中 → 優先取匹配較長且為精確材料符號/名稱者（例如 TiN 優先於 Ti）
     seen, out = set(), []
     for pos, _neg_len, _prio, raw, sym in sorted(found):
@@ -356,40 +392,53 @@ def find_materials(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def count_materials(text: str) -> Counter:
-    return Counter(sym for _, sym in find_materials(text))
+def count_materials(
+    text: str,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> Counter:
+    return Counter(sym for _, sym in find_materials(text, ctx=ctx))
 
 
-def assign_material(contexts: list[str], paper_counts: Counter) -> tuple[str, str]:
+def assign_material(
+    contexts: list[str],
+    paper_counts: Counter,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> tuple[str, str]:
     """
     決定一筆數據屬於哪個材料，回傳 (material_id, method)。
       1. 數值前後文（context）出現的金屬；若含目標金屬則優先
       2. 否則用整篇論文出現最多次的金屬
       3. 目標金屬次數與第一名差距 < 20% 時，選目標金屬
     """
+    resolved_ctx = _resolve_ctx(ctx)
+    metal_symbol = resolved_ctx.metal_symbol
+    min_mentions = resolved_ctx.settings.min_material_mentions
+
     ctx_counts = Counter()
-    for ctx in contexts:
-        if ctx:
-            ctx_counts.update(count_materials(ctx))
+    for context_str in contexts:
+        if context_str:
+            ctx_counts.update(count_materials(context_str, ctx=resolved_ctx))
 
     if ctx_counts:
-        if METAL_SYMBOL in ctx_counts:
-            return METAL_SYMBOL, "context"
+        if metal_symbol in ctx_counts:
+            return metal_symbol, "context"
         # 只採用在全文中也有一定份量的金屬，避免引用文獻順帶提及
         for sym, _ in ctx_counts.most_common():
-            if paper_counts.get(sym, 0) >= MIN_MATERIAL_MENTIONS:
+            if paper_counts.get(sym, 0) >= min_mentions:
                 return sym, "context"
 
     if paper_counts:
         top_sym, top_n = paper_counts.most_common(1)[0]
-        target_n = paper_counts.get(METAL_SYMBOL, 0)
-        if top_sym == METAL_SYMBOL:
-            return METAL_SYMBOL, "paper_majority"
+        target_n = paper_counts.get(metal_symbol, 0)
+        if top_sym == metal_symbol:
+            return metal_symbol, "paper_majority"
         if target_n >= 0.8 * top_n:
-            return METAL_SYMBOL, "target_default"
+            return metal_symbol, "target_default"
         return top_sym, "paper_majority"
 
-    return METAL_SYMBOL, "target_default"
+    return metal_symbol, "target_default"
 
 
 _REF_HEADING = re.compile(
@@ -566,210 +615,8 @@ def normalise_material(raw: str) -> str | None:
  
 
 # ====================================================================
-
-# 7. SOLUTION CLASSIFICATION HELPERS
-
+# 7. SOLUTION CLASSIFICATION HELPERS (backed by chemical_species.json)
 # ====================================================================
-
- 
-
-SPECIES_CATEGORIES: dict[str, dict] = {
-    "H2O2": {"role": "oxidizer", "field": "oxidizer_type"},
-    "H₂O₂": {"role": "oxidizer", "field": "oxidizer_type"},
-    "hydrogen peroxide": {"role": "oxidizer", "field": "oxidizer_type"},
-    "HNO3": {"role": "oxidizer", "field": "oxidizer_type"},
-    "O3": {"role": "oxidizer", "field": "oxidizer_type"},
-    "FeCl3": {"role": "oxidizer", "field": "oxidizer_type"},
-    "Fe(NO3)3": {"role": "oxidizer", "field": "oxidizer_type"},
-    "KIO4": {"role": "oxidizer", "field": "oxidizer_type"},
-    "KIO3": {"role": "oxidizer", "field": "oxidizer_type"},
-    "NaClO": {"role": "oxidizer", "field": "oxidizer_type"},
-    "K2S2O8": {"role": "oxidizer", "field": "oxidizer_type"},
-    "Na2S2O8": {"role": "oxidizer", "field": "oxidizer_type"},
-    "(NH4)2S2O8": {"role": "oxidizer", "field": "oxidizer_type"},
-    "HCl": {"role": "acid", "field": "acid_type"},
-    "H2SO4": {"role": "acid", "field": "acid_type"},
-    "H₂SO₄": {"role": "acid", "field": "acid_type"},
-    "HClO4": {"role": "acid", "field": "acid_type"},
-    "H3PO4": {"role": "acid", "field": "acid_type"},
-    "HF": {"role": "acid", "field": "acid_type"},
-    "hydrofluoric acid": {"role": "acid", "field": "acid_type"},
-    "citric acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
-    "oxalic acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
-    "malic acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
-    "tartaric acid": {"role": "chelating_agent", "field": "chelating_agent_type"},
-    "acetic acid": {"role": "acid", "field": "acid_type"},
-    "KOH": {"role": "base", "field": "base_type"},
-    "NaOH": {"role": "base", "field": "base_type"},
-    "NH4OH": {"role": "base", "field": "base_type"},
-    "NH₄OH": {"role": "base", "field": "base_type"},
-    "ammonium hydroxide": {"role": "base", "field": "base_type"},
-    "TMAH": {"role": "base", "field": "base_type"},
-    "tetramethylammonium hydroxide": {"role": "base", "field": "base_type"},
-    "LiOH": {"role": "base", "field": "base_type"},
-    "NaCl": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "KCl": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "Na2SO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "K2SO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "NaHCO3": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "KHCO3": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "Na2CO3": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "K2CO3": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "NaClO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "KNO3": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "NaNO3": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "Na2HPO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "KH2PO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "K2HPO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "NaH2PO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "Na2B4O7": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "K3Fe(CN)6": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "K4Fe(CN)6": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "CuSO4": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "CuCl2": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "phosphate buffer": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "PBS": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "borate buffer": {"role": "electrolyte_additive", "field": "electrolyte_additive"},
-    "EDTA": {"role": "chelating_agent", "field": "chelating_agent_type"},
-    "glycine": {"role": "chelating_agent", "field": "chelating_agent_type"},
-    "BTA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "benzotriazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "TTA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "tolyltriazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "TAZ": {"role": "inhibitor", "field": "inhibitor_type"},
-    "1,2,4-triazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "ATA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "3-amino-1,2,4-triazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "5-AT": {"role": "inhibitor", "field": "inhibitor_type"},
-    "5-aminotetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "aminotetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "MBI": {"role": "inhibitor", "field": "inhibitor_type"},
-    "2-mercaptobenzimidazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "MBT": {"role": "inhibitor", "field": "inhibitor_type"},
-    "2-mercaptobenzothiazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "MPT": {"role": "inhibitor", "field": "inhibitor_type"},
-    "5-mercapto-1-phenyl-1H-tetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "5-mercapto-1-phenyltetrazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "BIA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "benzimidazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "imidazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "pyrazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "thiazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "1,3,4-thiadiazole": {"role": "inhibitor", "field": "inhibitor_type"},
-    "adenine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "guanine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "purine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "8-HQ": {"role": "inhibitor", "field": "inhibitor_type"},
-    "8-hydroxyquinoline": {"role": "inhibitor", "field": "inhibitor_type"},
-    "pyridine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "thiourea": {"role": "inhibitor", "field": "inhibitor_type"},
-    "TU": {"role": "inhibitor", "field": "inhibitor_type"},
-    "thiosemicarbazide": {"role": "inhibitor", "field": "inhibitor_type"},
-    "urotropine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "hexamethylenetetramine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "HMTA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "MEA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "monoethanolamine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "cysteine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-cysteine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "methionine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-methionine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "histidine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-histidine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "tryptophan": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-tryptophan": {"role": "inhibitor", "field": "inhibitor_type"},
-    "glutamic acid": {"role": "inhibitor", "field": "inhibitor_type"},
-    "aspartic acid": {"role": "inhibitor", "field": "inhibitor_type"},
-    "alanine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-alanine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "arginine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-arginine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "lysine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "L-lysine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "SDS": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium dodecyl sulfate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "SDBS": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium dodecylbenzenesulfonate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "CTAB": {"role": "inhibitor", "field": "inhibitor_type"},
-    "cetyltrimethylammonium bromide": {"role": "inhibitor", "field": "inhibitor_type"},
-    "DTAB": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Triton X-100": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Tween-80": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Tween 80": {"role": "inhibitor", "field": "inhibitor_type"},
-    "PEG": {"role": "inhibitor", "field": "inhibitor_type"},
-    "polyethylene glycol": {"role": "inhibitor", "field": "inhibitor_type"},
-    "PEI": {"role": "inhibitor", "field": "inhibitor_type"},
-    "polyethyleneimine": {"role": "inhibitor", "field": "inhibitor_type"},
-    "PAA": {"role": "inhibitor", "field": "inhibitor_type"},
-    "polyacrylic acid": {"role": "inhibitor", "field": "inhibitor_type"},
-    "PVP": {"role": "inhibitor", "field": "inhibitor_type"},
-    "polyvinylpyrrolidone": {"role": "inhibitor", "field": "inhibitor_type"},
-    "potassium oleate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium oleate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium benzoate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Na2MoO4": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium molybdate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Na2SiO3": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium silicate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Na2WO4": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium tungstate": {"role": "inhibitor", "field": "inhibitor_type"},
-    "CeCl3": {"role": "inhibitor", "field": "inhibitor_type"},
-    "Ce(NO3)3": {"role": "inhibitor", "field": "inhibitor_type"},
-    "K2Cr2O7": {"role": "inhibitor", "field": "inhibitor_type"},
-    "NaNO2": {"role": "inhibitor", "field": "inhibitor_type"},
-    "sodium nitrite": {"role": "inhibitor", "field": "inhibitor_type"},
-    "IPA": {"role": "organic_solvent", "field": "organic_solvent_type"},
-    "isopropanol": {"role": "organic_solvent", "field": "organic_solvent_type"},
-    "DMSO": {"role": "organic_solvent", "field": "organic_solvent_type"},
-    "NMP": {"role": "organic_solvent", "field": "organic_solvent_type"},
-    "EG": {"role": "organic_solvent", "field": "organic_solvent_type"},
-    "ethylene glycol": {"role": "organic_solvent", "field": "organic_solvent_type"},
-}
-
-_SPECIES_CANONICAL: dict[str, str] = {
-    "h₂so₄": "H2SO4", "h2so4": "H2SO4",
-    "h₂o₂": "H2O2", "h2o2": "H2O2", "hydrogen peroxide": "H2O2",
-    "nh₄oh": "NH4OH", "nh4oh": "NH4OH", "ammonium hydroxide": "NH4OH",
-    "hydrofluoric acid": "HF", "hf": "HF",
-    "tetramethylammonium hydroxide": "TMAH", "tmah": "TMAH",
-    "phosphate buffer": "PBS", "pbs": "PBS",
-    "ethylene glycol": "EG", "eg": "EG",
-    "isopropanol": "IPA", "ipa": "IPA",
-    "benzotriazole": "BTA", "bta": "BTA",
-    "tolyltriazole": "TTA", "tta": "TTA",
-    "1,2,4-triazole": "TAZ", "taz": "TAZ",
-    "3-amino-1,2,4-triazole": "ATA", "ata": "ATA",
-    "5-aminotetrazole": "5-AT", "5-at": "5-AT",
-    "2-mercaptobenzimidazole": "MBI", "mbi": "MBI",
-    "2-mercaptobenzothiazole": "MBT", "mbt": "MBT",
-    "5-mercapto-1-phenyl-1h-tetrazole": "MPT",
-    "5-mercapto-1-phenyltetrazole": "MPT", "mpt": "MPT",
-    "benzimidazole": "BIA", "bia": "BIA",
-    "8-hydroxyquinoline": "8-HQ", "8-hq": "8-HQ",
-    "thiourea": "thiourea", "tu": "thiourea",
-    "hexamethylenetetramine": "HMTA", "urotropine": "HMTA", "hmta": "HMTA",
-    "monoethanolamine": "MEA", "mea": "MEA",
-    "l-cysteine": "cysteine", "cysteine": "cysteine",
-    "l-methionine": "methionine", "methionine": "methionine",
-    "l-histidine": "histidine", "histidine": "histidine",
-    "l-tryptophan": "tryptophan", "tryptophan": "tryptophan",
-    "l-alanine": "alanine", "alanine": "alanine",
-    "l-arginine": "arginine", "arginine": "arginine",
-    "l-lysine": "lysine", "lysine": "lysine",
-    "sodium dodecyl sulfate": "SDS", "sds": "SDS",
-    "sodium dodecylbenzenesulfonate": "SDBS", "sdbs": "SDBS",
-    "cetyltrimethylammonium bromide": "CTAB", "ctab": "CTAB",
-    "tween 80": "Tween-80", "tween-80": "Tween-80",
-    "polyethylene glycol": "PEG", "peg": "PEG",
-    "polyethyleneimine": "PEI", "pei": "PEI",
-    "polyacrylic acid": "PAA", "paa": "PAA",
-    "polyvinylpyrrolidone": "PVP", "pvp": "PVP",
-    "sodium molybdate": "Na2MoO4", "na2moo4": "Na2MoO4",
-    "sodium silicate": "Na2SiO3", "na2sio3": "Na2SiO3",
-    "sodium tungstate": "Na2WO4", "na2wo4": "Na2WO4",
-    "sodium nitrite": "NaNO2", "nano2": "NaNO2",
-}
-_SPECIES_CAT_LOWER = {k.lower(): (k, v) for k, v in SPECIES_CATEGORIES.items()}
 
 _REF_ELEC_BEFORE_RE = re.compile(
     r"(?:Ag\s*[/|]\s*AgCl|SCE\b|calomel|Hg\s*[/|]\s*HgO|Hg\s*[/|]\s*Hg[2₂]SO[4₄])"
@@ -801,22 +648,11 @@ _STRONG_BASES = {"KOH", "NaOH", "LiOH", "TMAH"}
 
 
 def normalise_species(raw: str) -> str:
-    s = re.sub(r"\s+", " ", raw.strip())
-    low = s.lower()
-    if low in _SPECIES_CANONICAL:
-        return _SPECIES_CANONICAL[low]
-    if low in _SPECIES_CAT_LOWER:
-        return _SPECIES_CAT_LOWER[low][0]
-    return s
+    return _SPECIES_REGISTRY.normalise(raw)
 
 
 def lookup_species_category(species: str) -> dict | None:
-    if not species:
-        return None
-    if species in SPECIES_CATEGORIES:
-        return SPECIES_CATEGORIES[species]
-    hit = _SPECIES_CAT_LOWER.get(species.lower())
-    return hit[1] if hit else None
+    return _SPECIES_REGISTRY.lookup_category(species)
 
 
 def extract_electrolytes(text: str) -> list[dict]:
@@ -1062,16 +898,17 @@ def generate_solution_id(components: list[dict], ph: float | None,
 
  
 
-def get_context(text: str, match_obj, window: int = None) -> str:  # ✅ 用 config
-
+def get_context(
+    text: str,
+    match_obj,
+    window: int = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
+) -> str:
     if window is None:
-
-        window = CONTEXT_WINDOW
-
+        window = _resolve_ctx(ctx).settings.context_window
     start = max(0, match_obj.start() - window)
-
     end = min(len(text), match_obj.end() + window)
-
     return text[start:end].replace("\n", " ").strip()
 
  
@@ -1098,232 +935,159 @@ def detect_reactions(text: str) -> list[str]:
 
  
 
-def extract_from_text(text: str, source_id: str,
-                      paper_counts: Counter | None = None) -> list[dict]:
+def extract_paper_environment(
+    norm_text: str,
+    body_text: str | None = None,
+    *,
+    table_captions: dict[int, str] | None = None,
+) -> PaperEnvironment:
+    """從單篇論文內文一次性擷取共用實驗環境（供內文與表格擷取共享）。"""
+    body = (
+        body_text
+        if body_text is not None
+        else (strip_references(norm_text) if len(norm_text) >= 600 else norm_text)
+    )
+    electrolytes = extract_electrolytes(body)
+    ph_counts = extract_phs(body)
+    temp_counts = extract_temperatures(body)
+    ref_counts = extract_ref_electrodes(body)
+    refs = [r for r, _ in sorted(ref_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    reactions = detect_reactions(norm_text)
+
+    form_matches = list(METAL_FORM_PATTERN.finditer(norm_text))
+    prep_matches = list(SURFACE_PREP_PATTERN.finditer(norm_text))
+    method_matches = list(MEASUREMENT_METHOD_PATTERN.finditer(norm_text))
+    scan_rate_matches = list(SCAN_RATE_PATTERN.finditer(norm_text))
+    immersion_matches = list(IMMERSION_TIME_PATTERN.finditer(norm_text))
+    deaer_matches = list(DEAERATION_PATTERN.finditer(norm_text))
+
+    unique_forms = list(OrderedDict.fromkeys(m.group("form").strip() for m in form_matches))
+    unique_preps = list(OrderedDict.fromkeys(m.group("prep").strip() for m in prep_matches))
+    unique_methods = list(OrderedDict.fromkeys(m.group("method").strip() for m in method_matches))
+
+    is_deaerated = any(
+        "deaerat" in m.group("deaerated").lower()
+        or "nitrogen" in m.group("deaerated").lower()
+        or "argon" in m.group("deaerated").lower()
+        or "oxygen-free" in m.group("deaerated").lower()
+        or "n2" in m.group("deaerated").lower()
+        or "ar" in m.group("deaerated").lower()
+        for m in deaer_matches
+    ) if deaer_matches else False
+
+    is_aerated = any(
+        "aerated" in m.group("deaerated").lower()
+        and "deaerat" not in m.group("deaerated").lower()
+        for m in deaer_matches
+    ) if deaer_matches else False
+
+    is_o2_saturated = any(
+        "o2" in m.group("deaerated").lower()
+        and "saturat" in m.group("deaerated").lower()
+        for m in deaer_matches
+    ) if deaer_matches else False
+
+    return PaperEnvironment(
+        electrolytes=electrolytes,
+        ph_counts=ph_counts,
+        temp_counts=temp_counts,
+        ref_counts=ref_counts,
+        refs=refs,
+        reactions=reactions,
+        table_captions=dict(table_captions or {}),
+        metal_form="; ".join(unique_forms) if unique_forms else None,
+        surface_preparation="; ".join(unique_preps) if unique_preps else None,
+        measurement_methods="; ".join(unique_methods) if unique_methods else None,
+        scan_rates_raw="; ".join(
+            f"{m.group('value')} {m.group('unit')}" for m in scan_rate_matches
+        ) if scan_rate_matches else None,
+        immersion_times_raw="; ".join(
+            f"{m.group('value')} {m.group('unit')}" for m in immersion_matches
+        ) if immersion_matches else None,
+        deaerated=is_deaerated,
+        aerated=is_aerated,
+        o2_saturated=is_o2_saturated,
+    )
+
+
+def extract_from_text(
+    text: str,
+    source_id: str,
+    paper_counts: Counter | None = None,
+    *,
+    ctx: config.MetalRunContext | None = None,
+    paper_environment: PaperEnvironment | dict | None = None,
+) -> list[dict]:
+    resolved_ctx = _resolve_ctx(ctx)
+    settings = resolved_ctx.settings
+    metal_symbol = resolved_ctx.metal_symbol
 
     text = normalize_text(text)
     records = []
 
-    # --- 全文級別資訊（去除文末參考文獻，避免引用論文汙染實驗環境）---
-    body_text = strip_references(text) if len(text) >= 600 else text
-
-    electrolytes = extract_electrolytes(body_text)
-    ph_counts = extract_phs(body_text)
-    temp_counts = extract_temperatures(body_text)
+    env = (
+        PaperEnvironment.from_mapping(paper_environment)
+        if paper_environment is not None
+        else extract_paper_environment(text)
+    )
+    electrolytes = env.electrolytes
+    ph_counts = env.ph_counts
+    temp_counts = env.temp_counts
     phs = [p for p, _ in ph_counts.most_common()]
     temps = [t for t, _ in temp_counts.most_common()]
-
-    ref_counts = extract_ref_electrodes(body_text)
-    refs = [r for r, _ in sorted(ref_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
-
- 
+    ref_counts = env.ref_counts
+    refs = env.refs
 
     ecorr_matches = list(ECORR_PATTERN.finditer(text))
-
     icorr_matches = list(ICORR_PATTERN.finditer(text))
-
     tafel_a_matches = list(TAFEL_ANODIC_PATTERN.finditer(text))
-
     tafel_c_matches = list(TAFEL_CATHODIC_PATTERN.finditer(text))
-
     tafel_all_matches = list(TAFEL_PATTERN.finditer(text))
-
-    scan_rate_matches = list(SCAN_RATE_PATTERN.finditer(text))
-
     cr_matches = list(CR_PATTERN.finditer(text))
-
     rp_matches = list(RP_PATTERN.finditer(text))
 
-    immersion_matches = list(IMMERSION_TIME_PATTERN.finditer(text))
-
-    method_matches = list(MEASUREMENT_METHOD_PATTERN.finditer(text))
-
- 
-
-    material_hits = find_materials(text)
-
-    form_matches = list(METAL_FORM_PATTERN.finditer(text))
-
-    prep_matches = list(SURFACE_PREP_PATTERN.finditer(text))
-
-    deaer_matches = list(DEAERATION_PATTERN.finditer(text))
-
- 
-
-    reactions = detect_reactions(text)
-
- 
-
+    material_hits = find_materials(text, ctx=resolved_ctx)
     unique_materials_raw = list(OrderedDict.fromkeys(raw for raw, _ in material_hits))[:30]
 
     if paper_counts is None:
         paper_counts = Counter(sym for _, sym in material_hits)
 
     materials_sorted, materials_counts_str = format_counts(
-        paper_counts, MIN_MATERIAL_MENTIONS
+        paper_counts, settings.min_material_mentions
     )
     paper_primary = paper_counts.most_common(1)[0][0] if paper_counts else None
 
-    unique_forms = list({m.group("form").strip() for m in form_matches})
-
-    unique_preps = list({m.group("prep").strip() for m in prep_matches})
-
-    unique_methods = list({m.group("method").strip() for m in method_matches})
-
- 
-
-    is_deaerated = any(
-
-        "deaerat" in m.group("deaerated").lower()
-
-        or "nitrogen" in m.group("deaerated").lower()
-
-        or "argon" in m.group("deaerated").lower()
-
-        or "oxygen-free" in m.group("deaerated").lower()
-
-        or "n2" in m.group("deaerated").lower()
-
-        or "ar" in m.group("deaerated").lower()
-
-        for m in deaer_matches
-
-    ) if deaer_matches else False
-
- 
-
-    is_aerated = any(
-
-        "aerated" in m.group("deaerated").lower()
-
-        and "deaerat" not in m.group("deaerated").lower()
-
-        for m in deaer_matches
-
-    ) if deaer_matches else False
-
- 
-
-    is_o2_saturated = any(
-
-        "o2" in m.group("deaerated").lower()
-
-        and "saturat" in m.group("deaerated").lower()
-
-        for m in deaer_matches
-
-    ) if deaer_matches else False
-
- 
-
-    base_record = {
-
-        "source_id": source_id,
-
-        "materials_raw": "; ".join(unique_materials_raw),
-
-        "materials_normalised": materials_sorted,
-        "material_mention_counts": materials_counts_str,
-        "paper_primary_material": paper_primary,
-        "target_mentions": paper_counts.get(METAL_SYMBOL, 0),
-
-        "metal_form": "; ".join(unique_forms) if unique_forms else None,
-
-        "surface_preparation": "; ".join(unique_preps) if unique_preps else None,
-
-        "electrolytes_raw": "; ".join(
-            f"{e['conc']} {e['unit']} {e['species']}" for e in electrolytes
-        ),
-        "ph_values": "; ".join(str(p) for p in phs) if phs else None,
-        "temperature_C_values": "; ".join(str(t) for t in temps) if temps else None,
-        "reference_electrodes": "; ".join(refs) if refs else None,
-
-        "deaerated": is_deaerated,
-
-        "aerated": is_aerated,
-
-        "o2_saturated": is_o2_saturated,
-
-        "measurement_methods": "; ".join(unique_methods) if unique_methods else None,
-
-        "scan_rates_raw": "; ".join(
-
-            f"{m.group('value')} {m.group('unit')}" for m in scan_rate_matches
-
-        ) if scan_rate_matches else None,
-
-        "reactions": "; ".join(reactions) if reactions else None,
-
-        "immersion_times_raw": "; ".join(
-
-            f"{m.group('value')} {m.group('unit')}" for m in immersion_matches
-
-        ) if immersion_matches else None,
-
-        "extraction_method": "regex",
-
-    }
-
- 
-
     # --- Ecorr ---
-
     ecorr_values = []
-
     for m in ecorr_matches:
-
         raw_v = parse_scientific(m.group("value"))
-
         unit = m.group("unit")
-
         if raw_v is not None:
-
             v, warn = normalize_ecorr_to_v(raw_v, unit)
-
             ecorr_values.append({
-
                 "raw": m.group("value"),
-
                 "unit": unit,
-
                 "value_V": v,
                 "warn": warn,
-
                 "context": get_context(text, m, 100),
-                "context_wide": get_context(text, m),
-
+                "context_wide": get_context(text, m, ctx=resolved_ctx),
             })
 
- 
-
     # --- icorr ---
-
     icorr_values = []
-
     for m in icorr_matches:
-
         raw_v = parse_scientific(m.group("value"))
-
         unit = m.group("unit")
-
         if raw_v is not None:
-
             v = normalize_icorr_to_uA_cm2(raw_v, unit)
-
             if v is None:
                 continue
-
             icorr_values.append({
-
                 "raw": m.group("value"),
-
                 "unit": unit,
-
                 "value_uA_cm2": v,
-
                 "context": get_context(text, m, 100),
-                "context_wide": get_context(text, m),
-
+                "context_wide": get_context(text, m, ctx=resolved_ctx),
             })
 
     # 支援內文中的 log(icorr) / lg(icorr) 表達式（例如 log(icorr) = -5.2 A/cm2）
@@ -1344,98 +1108,67 @@ def extract_from_text(text: str, source_id: str,
                 "unit": f"log({unit or 'A/cm2'})",
                 "value_uA_cm2": v,
                 "context": get_context(text, m, 100),
-                "context_wide": get_context(text, m),
+                "context_wide": get_context(text, m, ctx=resolved_ctx),
             })
 
- 
-
-    # --- Tafel slopes ---
-
-    beta_a_values = []
-
+    # --- Tafel slopes（與表格共用 normalize_tafel_slope 上下限與備註規則）---
+    beta_a_values: list[tuple[float, list[str]]] = []
     for m in tafel_a_matches:
-
         raw_v = parse_scientific(m.group("value"))
+        norm_v, notes = normalize_tafel_slope(
+            raw_v,
+            m.group("unit"),
+            tafel_min=settings.tafel_min,
+            tafel_max=settings.tafel_max,
+            label="βa",
+            allow_above_max=True,
+        )
+        if norm_v is not None:
+            beta_a_values.append((norm_v, notes))
 
-        if raw_v is not None:
-
-            if "V" in m.group("unit") and "mV" not in m.group("unit"):
-
-                raw_v *= 1000
-
-            beta_a_values.append(abs(raw_v))
-
- 
-
-    beta_c_values = []
-
+    beta_c_values: list[tuple[float, list[str]]] = []
     for m in tafel_c_matches:
-
         raw_v = parse_scientific(m.group("value"))
-
-        if raw_v is not None:
-
-            if "V" in m.group("unit") and "mV" not in m.group("unit"):
-
-                raw_v *= 1000
-
-            beta_c_values.append(abs(raw_v))
-
- 
+        norm_v, notes = normalize_tafel_slope(
+            raw_v,
+            m.group("unit"),
+            tafel_min=settings.tafel_min,
+            tafel_max=settings.tafel_max,
+            label="βc",
+            allow_above_max=True,
+        )
+        if norm_v is not None:
+            beta_c_values.append((norm_v, notes))
 
     cr_values = []
-
     for m in cr_matches:
-
         raw_v = parse_scientific(m.group("value"))
-
         if raw_v is not None:
-
             cr_values.append({
-
                 "raw": m.group("value"),
-
                 "unit": m.group("unit"),
-
                 "value": raw_v,
-
             })
-
- 
 
     rp_values = []
-
     for m in rp_matches:
-
         raw_v = parse_scientific(m.group("value"))
-
         if raw_v is not None:
-
             rp_values.append({
-
                 "raw": m.group("value"),
-
                 "unit": m.group("unit"),
-
                 "value": raw_v,
-
             })
 
- 
-
-    tafel_a_ctx = [get_context(text, m) for m in tafel_a_matches]
-    tafel_c_ctx = [get_context(text, m) for m in tafel_c_matches]
-    tafel_all_ctx = [get_context(text, m) for m in tafel_all_matches]
+    tafel_a_ctx = [get_context(text, m, ctx=resolved_ctx) for m in tafel_a_matches]
+    tafel_c_ctx = [get_context(text, m, ctx=resolved_ctx) for m in tafel_c_matches]
+    tafel_all_ctx = [get_context(text, m, ctx=resolved_ctx) for m in tafel_all_matches]
 
     # --- 建立 records ---
-
     n_records = max(1, len(ecorr_values), len(icorr_values))
 
- 
-
     for i in range(n_records):
-
-        rec = dict(base_record)
+        rec_notes: list[str] = []
 
         # ---- 依數值上下文判定材料 ----
         ctxs = []
@@ -1450,194 +1183,147 @@ def extract_from_text(text: str, source_id: str,
             ctxs.append(tafel_all_ctx[0])
         if len(text) < 600:          # 表格列：整列本身就是上下文
             ctxs.append(text)
-        mat_id, mat_method = assign_material(ctxs, paper_counts)
-        rec["material_id_assigned"] = mat_id
-        rec["material_assignment_method"] = mat_method
-        rec["is_target_metal"] = (mat_id == METAL_SYMBOL)
 
-        # ---- 依數值上下文配對實驗環境（電解質 / pH / 溫度）----
+        mat_id, mat_method = assign_material(ctxs, paper_counts, ctx=resolved_ctx)
+
+        # ---- 依數值上下文配對實驗環境（電解質 / pH / 溫度 / 參考電極）----
         rec_els, rec_ph, rec_temp = select_environment_for_record(
             ctxs, electrolytes, ph_counts, temp_counts
         )
-        rec["record_electrolytes"] = rec_els
-        rec["electrolytes_raw"] = "; ".join(
-            f"{e['conc']} {e['unit']} {e['species']}" for e in rec_els
+        sol_id = generate_solution_id(rec_els, rec_ph, rec_temp) if (rec_els or rec_ph is not None) else None
+
+        rec_ref = select_ref_electrode(ctxs, ref_counts)
+        ordered_refs = (
+            [rec_ref] + [r for r in refs if r != rec_ref]
+            if rec_ref
+            else list(refs)
         )
-        rec["record_ph"] = rec_ph
-        rec["record_temp"] = rec_temp
-        if rec_els or rec_ph is not None:
-            rec["solution_id_assigned"] = generate_solution_id(rec_els, rec_ph, rec_temp)
-        else:
-            rec["solution_id_assigned"] = None
 
- 
-
+        ecorr_v_orig = ecorr_unit = ecorr_raw = ecorr_v_she = None
         if i < len(ecorr_values):
-
             ev = ecorr_values[i]
+            ecorr_v_orig = ev["value_V"]
+            ecorr_unit = ev["unit"]
+            ecorr_raw = ev["raw"]
+            if ev.get("warn"):
+                rec_notes.append(ev["warn"])
+            ecorr_v_she = resolve_ecorr_she(ecorr_v_orig, rec_ref, rec_ph)
 
-            rec["Ecorr_V_original"] = ev["value_V"]
-
-            rec["Ecorr_unit_original"] = ev["unit"]
-
-            rec["Ecorr_raw"] = ev["raw"]
-
-            if refs:
-
-                rec["Ecorr_V_SHE"] = convert_to_she(
-
-                    ev["value_V"], refs[0],
-
-                    phs[0] if phs else None
-
-                )
-
-            else:
-
-                rec["Ecorr_V_SHE"] = None
-
-        else:
-
-            rec["Ecorr_V_original"] = None
-
-            rec["Ecorr_unit_original"] = None
-
-            rec["Ecorr_raw"] = None
-
-            rec["Ecorr_V_SHE"] = None
-
- 
-
+        icorr_uA = icorr_raw = icorr_unit = log_icorr = None
         if i < len(icorr_values):
-
             iv = icorr_values[i]
+            icorr_uA = iv["value_uA_cm2"]
+            icorr_raw = iv["raw"]
+            icorr_unit = iv["unit"]
+            if icorr_uA is not None and icorr_uA > 0:
+                log_icorr = np.log10(icorr_uA * 1e-6)
 
-            rec["icorr_uA_cm2"] = iv["value_uA_cm2"]
+        beta_a_val: float | None = None
+        if beta_a_values:
+            ba_entry = beta_a_values[i] if i < len(beta_a_values) else beta_a_values[0]
+            beta_a_val = ba_entry[0]
+            rec_notes.extend(ba_entry[1])
 
-            rec["icorr_raw"] = iv["raw"]
+        beta_c_val: float | None = None
+        if beta_c_values:
+            bc_entry = beta_c_values[i] if i < len(beta_c_values) else beta_c_values[0]
+            beta_c_val = bc_entry[0]
+            rec_notes.extend(bc_entry[1])
 
-            rec["icorr_unit_original"] = iv["unit"]
-
-            if iv["value_uA_cm2"] is not None:
-
-                rec["log_icorr"] = np.log10(
-
-                    iv["value_uA_cm2"] * 1e-6
-
-                ) if iv["value_uA_cm2"] > 0 else None
-
-            else:
-
-                rec["log_icorr"] = None
-
-        else:
-
-            rec["icorr_uA_cm2"] = None
-
-            rec["icorr_raw"] = None
-
-            rec["icorr_unit_original"] = None
-
-            rec["log_icorr"] = None
-
- 
-
-        rec["beta_a_mV_dec"] = beta_a_values[i] if i < len(beta_a_values) else (
-
-            beta_a_values[0] if beta_a_values else None
-
-        )
-
-        rec["beta_c_mV_dec"] = beta_c_values[i] if i < len(beta_c_values) else (
-
-            beta_c_values[0] if beta_c_values else None
-
-        )
-
- 
-
-        if rec["beta_a_mV_dec"] is None and rec["beta_c_mV_dec"] is None:
-
-            general_tafel = []
-
+        tafel_general_str: str | None = None
+        if beta_a_val is None and beta_c_val is None:
+            general_tafel: list[float] = []
             for m in tafel_all_matches:
-
                 raw_v = parse_scientific(m.group("value"))
-
-                if raw_v is not None:
-
-                    if "V" in m.group("unit") and "mV" not in m.group("unit"):
-
-                        raw_v *= 1000
-
-                    if TAFEL_MIN <= abs(raw_v) <= TAFEL_MAX:            # ✅ 用 config
-
-                        general_tafel.append(abs(raw_v))
-
-            if general_tafel:
-
-                rec["tafel_slopes_general_mV_dec"] = "; ".join(
-
-                    str(v) for v in general_tafel
-
+                norm_v, _ = normalize_tafel_slope(
+                    raw_v,
+                    m.group("unit"),
+                    tafel_min=settings.tafel_min,
+                    tafel_max=settings.tafel_max,
+                    label="Tafel",
+                    allow_above_max=False,
                 )
-
-            else:
-
-                rec["tafel_slopes_general_mV_dec"] = None
-
-        else:
-
-            rec["tafel_slopes_general_mV_dec"] = None
-
- 
+                if norm_v is not None:
+                    general_tafel.append(norm_v)
+            if general_tafel:
+                tafel_general_str = "; ".join(str(v) for v in general_tafel)
 
         if i < len(cr_values):
-
-            rec["CR_reported_value"] = cr_values[i]["value"]
-
-            rec["CR_reported_unit"] = cr_values[i]["unit"]
-
+            cr_val = cr_values[i]["value"]
+            cr_unit = cr_values[i]["unit"]
+        elif cr_values:
+            cr_val = cr_values[0]["value"]
+            cr_unit = cr_values[0]["unit"]
         else:
-
-            rec["CR_reported_value"] = cr_values[0]["value"] if cr_values else None
-
-            rec["CR_reported_unit"] = cr_values[0]["unit"] if cr_values else None
-
- 
+            cr_val = cr_unit = None
 
         if i < len(rp_values):
-
-            rec["Rp_value"] = rp_values[i]["value"]
-
-            rec["Rp_unit"] = rp_values[i]["unit"]
-
+            rp_val = rp_values[i]["value"]
+            rp_unit = rp_values[i]["unit"]
+        elif rp_values:
+            rp_val = rp_values[0]["value"]
+            rp_unit = rp_values[0]["unit"]
         else:
+            rp_val = rp_unit = None
 
-            rec["Rp_value"] = rp_values[0]["value"] if rp_values else None
-
-            rec["Rp_unit"] = rp_values[0]["unit"] if rp_values else None
-
- 
-
-        has_ecorr = rec["Ecorr_V_original"] is not None
-
-        has_icorr = rec["icorr_uA_cm2"] is not None
-
-        has_tafel = (rec["beta_a_mV_dec"] is not None
-
-                     or rec["beta_c_mV_dec"] is not None
-
-                     or rec["tafel_slopes_general_mV_dec"] is not None)
-
-        has_cr = rec["CR_reported_value"] is not None
-
- 
+        has_ecorr = ecorr_v_orig is not None
+        has_icorr = icorr_uA is not None
+        has_tafel = (
+            beta_a_val is not None
+            or beta_c_val is not None
+            or tafel_general_str is not None
+        )
+        has_cr = cr_val is not None
 
         if has_ecorr or has_icorr or has_tafel or has_cr:
-
-            records.append(rec)
-
- 
+            record = RawEchemRecord(
+                source_id=source_id,
+                materials_raw="; ".join(unique_materials_raw),
+                materials_normalised=materials_sorted,
+                material_mention_counts=materials_counts_str,
+                paper_primary_material=paper_primary,
+                target_mentions=paper_counts.get(metal_symbol, 0),
+                material_id_assigned=mat_id,
+                material_assignment_method=mat_method,
+                is_target_metal=(mat_id == metal_symbol),
+                metal_form=env.metal_form,
+                surface_preparation=env.surface_preparation,
+                record_electrolytes=rec_els,
+                electrolytes_raw="; ".join(
+                    f"{e['conc']} {e['unit']} {e['species']}" for e in rec_els
+                ),
+                record_ph=rec_ph,
+                ph_values="; ".join(str(p) for p in phs) if phs else None,
+                record_temp=rec_temp,
+                temperature_C_values="; ".join(str(t) for t in temps) if temps else None,
+                solution_id_assigned=sol_id,
+                reference_electrodes="; ".join(ordered_refs) if ordered_refs else None,
+                deaerated=env.deaerated,
+                aerated=env.aerated,
+                o2_saturated=env.o2_saturated,
+                measurement_methods=env.measurement_methods,
+                scan_rates_raw=env.scan_rates_raw,
+                reactions="; ".join(env.reactions) if env.reactions else None,
+                immersion_times_raw=env.immersion_times_raw,
+                extraction_method="regex",
+                context=ctxs[0] if ctxs else "",
+                Ecorr_V_original=ecorr_v_orig,
+                Ecorr_unit_original=ecorr_unit,
+                Ecorr_raw=ecorr_raw,
+                Ecorr_V_SHE=ecorr_v_she,
+                icorr_uA_cm2=icorr_uA,
+                icorr_raw=icorr_raw,
+                icorr_unit_original=icorr_unit,
+                log_icorr=log_icorr,
+                beta_a_mV_dec=beta_a_val,
+                beta_c_mV_dec=beta_c_val,
+                tafel_slopes_general_mV_dec=tafel_general_str,
+                CR_reported_value=cr_val,
+                CR_reported_unit=cr_unit,
+                Rp_value=rp_val,
+                Rp_unit=rp_unit,
+                extra_quality_notes="; ".join(rec_notes) if rec_notes else "",
+            )
+            records.append(record.to_dict())
 
     return records

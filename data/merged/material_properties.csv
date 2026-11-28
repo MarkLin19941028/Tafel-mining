@@ -1,12 +1,12 @@
 ﻿material_id,material_name,symbol,category,density_g_cm3,molar_mass_g_mol,valence,equivalent_weight_g_eq,standard_potential_V_SHE,melting_point_C,electronegativity_pauling,work_function_eV,oxide_type,oxide_stability,passivation_tendency,pourbaix_stable_pH_min,pourbaix_stable_pH_max,crystal_structure,thermal_conductivity_W_mK,electrical_resistivity_ohm_cm,common_corrosion_products,notes,_source_metal
-Al,Aluminum,Al,metal,2.7,26.982,3,8.994,-1.662,660.35,1.61,4.28,Al2O3,high,0.95,4.0,8.5,FCC,237.0,2.65e-06,"Al(OH)3, Al2O3",,Al; Cu; Mn; Ti; Co; Mo; TiN; W
-Co,Cobalt,Co,metal,8.9,58.933,2,29.466,-0.277,1494.85,1.88,5.0,"CoO, Co3O4",medium,0.5,8.5,13.5,HCP,100.0,6.24e-06,"CoCl2, Co(OH)2",,Al; Co; Cu; Mo; Ti; Ru; W
+Al,Aluminum,Al,metal,2.7,26.982,3,8.994,-1.662,660.35,1.61,4.28,Al2O3,high,0.95,4.0,8.5,FCC,237.0,2.65e-06,"Al(OH)3, Al2O3",,Al; Cu; Mn; Ti; Co; Mo; TiN; W; Ru
+Co,Cobalt,Co,metal,8.9,58.933,2,29.466,-0.277,1494.85,1.88,5.0,"CoO, Co3O4",medium,0.5,8.5,13.5,HCP,100.0,6.24e-06,"CoCl2, Co(OH)2",,Al; Co; Cu; Mo; Ti; Ru; W; Mn
 Cu,Copper,Cu,metal,8.96,63.546,2,31.773,0.342,1084.65,1.9,4.65,"CuO, Cu2O",low,0.4,7.0,13.0,FCC,401.0,1.68e-06,"CuCl2, Cu(OH)2, CuO",,Al; Co; Cu; W; Mn; Mo; Ru
 Mn,Manganese,Mn,metal,7.21,54.938,2,27.469,-1.185,1245.85,1.55,4.1,"MnO2, Mn3O4",medium,0.5,9.5,13.5,BCC,7.81,0.000144,"MnO2, Mn(OH)2",,Al; Co; Cu; Mn; Mo; W
-Mo,Molybdenum,Mo,metal,10.28,95.95,4,23.988,-0.2,2622.85,2.16,4.6,"MoO3, MoO2",medium,0.6,0.5,4.5,BCC,138.0,5.17e-06,"MoO3, MoO4^2-, H2MoO4",,Cu; Mo; Al; Co; Ti; Mn; W
+Mo,Molybdenum,Mo,metal,10.28,95.95,4,23.988,-0.2,2622.85,2.16,4.6,"MoO3, MoO2",medium,0.6,0.5,4.5,BCC,138.0,5.17e-06,"MoO3, MoO4^2-, H2MoO4",,Cu; Mo; Al; Co; Ti; Mn
 MoN,Molybdenum Nitride,MoN,barrier,9.46,109.96,4,27.49,0.05,1750.0,2.16,4.7,"MoO2, MoO3",medium,0.7,0.5,6.0,Hexagonal / NaCl-type,17.0,0.0001,"MoO2, MoO3, MoO4^2-, NH4+",,MoN
-Ru,Ruthenium,Ru,metal,12.37,101.07,3,33.69,0.455,2333.85,2.2,4.71,RuO2,high,0.8,2.0,12.5,HCP,117.0,7.1e-06,RuO4,,Ru; Cu; Mn; Co; Mo
-Ta,Tantalum,Ta,barrier,16.69,180.948,5,36.19,-0.75,3016.85,1.5,4.25,Ta2O5,high,0.9,0.0,14.0,BCC,57.5,1.31e-05,Ta2O5,,Ta; Al; Cu; Ti; Co
+Ru,Ruthenium,Ru,metal,12.37,101.07,3,33.69,0.455,2333.85,2.2,4.71,RuO2,high,0.8,2.0,12.5,HCP,117.0,7.1e-06,RuO4,,Ru; Cu; Mn; Mo; Co
+Ta,Tantalum,Ta,barrier,16.69,180.948,5,36.19,-0.75,3016.85,1.5,4.25,Ta2O5,high,0.9,0.0,14.0,BCC,57.5,1.31e-05,Ta2O5,,Ta; Al; Cu; Ti; Co; Mo; Mn
 TaN,Tantalum Nitride,TaN,barrier,14.3,194.95,5,38.99,0.1,3090.0,1.5,4.4,Ta2O5,high,0.9,1.0,13.0,NaCl-type,8.0,0.000135,Ta2O5,,Ta; TaN
 Ti,Titanium,Ti,metal,4.51,47.867,4,11.967,-1.63,1667.85,1.54,4.33,TiO2,high,0.9,1.5,13.5,HCP,21.9,4.2e-05,"TiO2, Ti(OH)4",,Al; Co; Cu; Mo; Ru; Ta; Ti; Mn; TiN; W
 TiN,Titanium Nitride,TiN,barrier,5.22,61.87,3,20.62,0.15,2930.0,1.54,4.5,TiO2,high,0.85,2.0,12.0,NaCl-type,19.2,2.5e-05,TiO2,,Ti; TiN; Co
