@@ -287,7 +287,10 @@ def write_quality_report(
             "|---|---:|---|---|---:|",
         ])
         group_col = "material_id" if "material_id" in echem_df.columns else "_source_metal"
-        for metal, grp in echem_df.groupby(group_col):
+        for metal, grp in sorted(
+            echem_df.groupby(group_col),
+            key=lambda kv: (-len(kv[1]), str(kv[0])),
+        ):
             e_s = grp["Ecorr_V_SHE"].dropna() if "Ecorr_V_SHE" in grp.columns else pd.Series(dtype=float)
             i_s = grp["icorr_uA_cm2"].dropna() if "icorr_uA_cm2" in grp.columns else pd.Series(dtype=float)
             ba_n = int(grp["beta_a_mV_dec"].notna().sum()) if "beta_a_mV_dec" in grp.columns else 0
